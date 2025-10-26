@@ -1,4 +1,4 @@
-pyTelegramBotAPI==4.12.0
+
 # main.py
 # Требует: pyTelegramBotAPI (pip install pyTelegramBotAPI)
 import os
