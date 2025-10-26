@@ -1,6 +1,4 @@
 
-# main.py
-# Требует: pyTelegramBotAPI (pip install pyTelegramBotAPI)
 import os
 import time
 import random
