@@ -12,7 +12,7 @@ import telebot
 from telebot import types
 
 # -----------------------
-# Вставь свой токен сюда
+# 8315023641:AAHLJg0kDC0xtTpgVh8wCd5st1Yjpoe39GM
 # -----------------------
 BOT_TOKEN = "8315023641:AAHLJg0kDC0xtTpgVh8wCd5st1Yjpoe39GM"  # <-- замените на ваш токен, в кавычках
 bot = telebot.TeleBot(BOT_TOKEN, parse_mode='Markdown')
