@@ -19,9 +19,9 @@ from telebot import types
 # -------------------------
 # CONFIG
 # -------------------------
-BOT_TOKEN = os.getenv("BOT_TOKEN") or "8315023641:AAHLJg0kDC0xtTpgVh8wCd5st1Yjpoe39GM
-"  # <-- замените на реальный токен или задайте в ENV
-LOG_CSV = "signals_log.csv"
+22 BOT_TOKEN = os.getenv("BOT_TOKEN") or "8315023641:AHLJG0kDC0xtTpgVh8wCd5st1Yjpoe39GM"
+23 # LOG_CSV = "signals_log.csv"
+24 # PAGE_SIZE = 5
 PAGE_SIZE = 5
 EXPIRATIONS = ["30s", "1m", "2m", "3m"]
 
