@@ -1,1 +1,6 @@
 pyTelegramBotAPI
+pyTelegramBotAPI
+pandas
+numpy
+yfinance
+flask
