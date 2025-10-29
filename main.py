@@ -18,7 +18,8 @@ import pandas as pd
 import yfinance as yf
 
 from flask import Flask
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
+
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
 # -------------------------
