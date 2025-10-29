@@ -489,45 +489,35 @@ def expiration_to_seconds(exp: str) -> int:
 # -------------------------
 # Entrypoint
 # -------------------------
-def main():
-    ensure_log()
-    keep_alive()
-    dp.add_handler(CommandHandler("start", start_cmd))
-    dp.add_handler(CallbackQueryHandler(callback_handler))
-    print("Bot started (forex-only, analysis via yfinance).")
-    updater.start_polling()
-    updater.idle()
+# 
+# from flask import Flask, request 
 
-# -------------------------
-# Entrypoint
-# -------------------------
+app = Flask(__name__) 
+
 def main():
     ensure_log()
     keep_alive()
 
-    # Инициализация Application
     application = Application.builder().token(BOT_TOKEN).build()
     
-    # Добавление обработчиков
     application.add_handler(CommandHandler("start", start_cmd))
     application.add_handler(CallbackQueryHandler(callback_handler))
 
     print("Bot started (forex-only, analysis via yfinance).")
-
-    # Запуск бота
-    application.(allowed_updates=Update.ALL_TYPES)
+    
+    @app.route(f"/{BOT_TOKEN}", methods=["POST"])
+    def telegram_webhook():
+        update = Update.de_json(request.get_json(force=True), application.bot)
+        application.process_update(update)
+        return "ok"
 
 
 if __name__ == "__main__":
     if not BOT_TOKEN:
         print("Please set BOT_TOKEN env var or edit the script with your token.")
     else:
-        # Здесь мы просто вызываем main(), без инициализации Updater
         main()
-
-
-        # Здесь мы просто вызываем main(), без инициализации Updater
-        main()
+        pass
 
         dp = updater.dispatcher
         main()
