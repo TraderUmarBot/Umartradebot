@@ -1,4 +1,6 @@
-python-telegram-bot==20.8
+python-telegram-bot==20.3
 yfinance
 pandas
 numpy
+requests
+gunicorn
