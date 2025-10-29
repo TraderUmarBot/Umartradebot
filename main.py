@@ -513,7 +513,7 @@ def main():
     print("Bot started (forex-only, analysis via yfinance).")
 
     # Запуск бота
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    application.(allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == "__main__":
