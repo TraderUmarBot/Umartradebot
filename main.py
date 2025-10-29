@@ -4,6 +4,7 @@
 # pandas, numpy, yfinance, flask
 
 import os
+PORT = int(os.environ.get('PORT', 8080)) 
 import time
 import threading
 import random
