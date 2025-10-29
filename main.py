@@ -18,7 +18,7 @@ import yfinance as yf
 
 from flask import Flask
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import Updater, CommandHandler, CallbackQueryHandler, CallbackContext
+from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
 
 # -------------------------
 # CONFIG
@@ -273,16 +273,17 @@ def make_page_keyboard(items: List[str], page: int, prefix: str) -> InlineKeyboa
 # -------------------------
 # Bot handlers
 # -------------------------
-updater = Updater(BOT_TOKEN, use_context=True)
-dp = updater.dispatcher
 
-def start_cmd(update: Update, context: CallbackContext):
+
+def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
     kb = [
         [InlineKeyboardButton("💱 Валюты", callback_data='cat_forex_page_0')]
     ]
     update.message.reply_text("👋 Привет! Выберите валютную пару для анализа:", reply_markup=InlineKeyboardMarkup(kb))
 
-def callback_handler(update: Update, context: CallbackContext):
+def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
     query = update.callback_query
     query.answer()
     data = query.data
