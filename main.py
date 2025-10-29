@@ -16,6 +16,7 @@ from typing import List, Dict, Tuple
 import numpy as np
 import pandas as pd
 import yfinance as yf
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 
 from flask import Flask
 from telegram.ext import Application, CommandHandler, CallbackQueryHandler, ContextTypes
