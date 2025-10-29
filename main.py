@@ -277,14 +277,16 @@ def make_page_keyboard(items: List[str], page: int, prefix: str) -> InlineKeyboa
 # Bot handlers
 # -------------------------
 
-
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
+    """Отправляет клавиатуру с выбором категории."""
 
     kb = [
         [InlineKeyboardButton("💱 Валюты", callback_data='cat_forex_page_0')]
     ]
-    update.message.reply_text("👋 Привет! Выберите валютную пару для анализа:", reply_markup=InlineKeyboardMarkup(kb))
+    
+    # ФИНАЛЬНОЕ ИСПРАВЛЕНИЕ: Добавлено 'await'
+    await update.message.reply_text("👋 Привет! Выберите валютную пару для анализа:", reply_markup=InlineKeyboardMarkup(kb))
+
 
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
