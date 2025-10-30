@@ -288,6 +288,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("👋 Привет! Выберите валютную пару для анализа:", reply_markup=InlineKeyboardMarkup(kb))
 
 
+
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
