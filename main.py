@@ -13,23 +13,11 @@ import yfinance as yf
 from flask import Flask
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Updater, CommandHandler, CallbackQueryHandler, CallbackContext
-# main.py
 
-# Токен бота
-BOT_TOKEN = "8316818247:AAGoR966pIH2MP9okrpKFPelsMc9wcWrXcQ"
-
-# Проверка, что токен установлен
-if not BOT_TOKEN:
-    raise ValueError("Бот токен не установлен!")
-
-# Пример использования токена
-print("Бот токен успешно установлен, можно запускать бота...")
-
-# Здесь далее идёт остальной код твоего бота
 # -----------------------------------------
 # CONFIG
 # -----------------------------------------
-BOT_TOKEN = os.getenv("BOT_TOKEN") 8316818247:AAGoR966pIH2MP9okrpKFPelsMc9wcWrXcQ
+BOT_TOKEN = "8316818247:AAGoR966pIH2MP9okrpKFPelsMc9wcWrXcQ"  # <- твой токен вставлен
 ANALYSIS_WAIT = 20
 PAGE_SIZE = 6
 
@@ -42,7 +30,7 @@ FOREX = [
 EXP = ["1m","2m","3m","5m"]
 
 # -----------------------------------------
-# FLASK KEEP ALIVE (должно быть)
+# FLASK KEEP ALIVE
 # -----------------------------------------
 app = Flask("")
 
@@ -198,7 +186,7 @@ def callback(update, ctx):
         pair=ctx.user_data["pair"]
 
         sent=q.edit_message_text(
-            f"⏳ Подождите *20 секунд* — идёт профессиональный анализ рынка по *{pair}*...",
+            f"⏳ Подождите *{ANALYSIS_WAIT} секунд* — идёт профессиональный анализ рынка по *{pair}*...",
             parse_mode="Markdown"
         )
 
