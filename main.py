@@ -13,7 +13,19 @@ import yfinance as yf
 from flask import Flask
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Updater, CommandHandler, CallbackQueryHandler, CallbackContext
+# main.py
 
+# Токен бота
+BOT_TOKEN = "8316818247:AAGoR966pIH2MP9okrpKFPelsMc9wcWrXcQ"
+
+# Проверка, что токен установлен
+if not BOT_TOKEN:
+    raise ValueError("Бот токен не установлен!")
+
+# Пример использования токена
+print("Бот токен успешно установлен, можно запускать бота...")
+
+# Здесь далее идёт остальной код твоего бота
 # -----------------------------------------
 # CONFIG
 # -----------------------------------------
