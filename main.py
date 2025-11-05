@@ -1,5 +1,5 @@
 # main.py
-# OXTSIGNALSBOT PRO — единый, исправленный и устойчивый код
+# OXTSIGNALSBOT PRO — режим: только реальные данные (yfinance, interval=1m)
 # Требования (requirements.txt):
 # python-telegram-bot==13.15
 # pandas
@@ -11,7 +11,6 @@
 import os
 import time
 import threading
-import random
 import csv
 import traceback
 from datetime import datetime, timedelta
@@ -26,11 +25,12 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Updater, CommandHandler, CallbackQueryHandler, CallbackContext
 
 # ---------------- CONFIG ----------------
-BOT_TOKEN = os.getenv("BOT_TOKEN") or ""  # <- Вставляй токен в Render env, не в код
-ANALYSIS_WAIT = 20                        # секунд ожидания анализа перед выдачей сигнала
+BOT_TOKEN = os.getenv("BOT_TOKEN") or ""  # <- обязательно в Render env
+ANALYSIS_WAIT = 20                        # секунд ожидания анализа
 PAGE_SIZE = 6
 LOG_CSV = "signals_log.csv"
 
+# Инструменты
 FOREX = [
     "EURUSD","GBPUSD","USDJPY","AUDUSD","USDCHF","EURJPY",
     "GBPJPY","NZDUSD","EURGBP","CADJPY","USDCAD","AUDJPY",
@@ -40,20 +40,23 @@ FOREX = [
 
 EXPIRATIONS = ["1m","2m","3m","5m"]
 
+# веса индикаторов для голосования
 WEIGHTS = {"EMA":2,"SMA":2,"MACD":2,"RSI":1,"BB":1}
 
-# PRO settings (по твоим ответам)
-CONSECUTIVE_WINS_LIMIT = 5      # после 5 подряд плюсов — пауза
-PAUSE_MINUTES_AFTER_WINS = 5    # пауза 5 минут
-NFP_HIGH_CONF = 75.0            # порог уверенности для NFP (инфо)
-COOLDOWN_SECONDS = 2            # защита от быстрого повторного запроса
+# PRO правила (по твоим настройкам)
+CONSECUTIVE_WINS_LIMIT = 5
+PAUSE_MINUTES_AFTER_WINS = 5
+COOLDOWN_SECONDS = 2   # защита от частых запросов в чате
+
+# yfinance параметры
+YF_INTERVAL = "1m"
+YF_PERIOD = "2d"
 
 # ---------------- FLASK (keep-alive) ----------------
 app = Flask(__name__)
-
 @app.route("/")
 def index():
-    return "OXTSIGNALSBOT PRO running"
+    return "OXTSIGNALSBOT PRO (yfinance 1m) is alive"
 
 def keep_alive():
     t = threading.Thread(target=lambda: app.run(host="0.0.0.0", port=8080), daemon=True)
@@ -87,7 +90,7 @@ def log_row(row: Dict):
     except Exception:
         print("Log error:", traceback.format_exc())
 
-# ---------------- Utils ----------------
+# ---------------- Utilities ----------------
 def exp_to_seconds(exp: str) -> int:
     if exp.endswith("m"):
         return int(exp.replace("m","")) * 60
@@ -96,53 +99,51 @@ def exp_to_seconds(exp: str) -> int:
     return 60
 
 def yf_symbol(pair: str) -> str:
-    p = pair.upper().replace(" ", "").replace("/", "")
+    p = pair.upper().replace("/","").replace(" ","")
     if len(p) == 6 and p.isalpha():
         return f"{p[:3]}{p[3:]}=X"
     return pair
 
-# ---------------- Data fetch + fallback ----------------
-def simulate_series(seed: str, bars: int = 360) -> pd.DataFrame:
-    rnd = random.Random(abs(hash(seed)) % (10**9))
-    price = 1.0 + rnd.uniform(-0.02, 0.02)
-    times = pd.date_range(end=pd.Timestamp.now(), periods=bars, freq="1min")
-    opens, highs, lows, closes, vols = [], [], [], [], []
-    for _ in range(bars):
-        o = price
-        c = max(1e-8, o + rnd.uniform(-0.002, 0.002))
-        h = max(o, c) + rnd.uniform(0, 0.001)
-        l = min(o, c) - rnd.uniform(0, 0.001)
-        v = rnd.randint(10, 900)
-        opens.append(o); highs.append(h); lows.append(l); closes.append(c); vols.append(v)
-        price = c
-    return pd.DataFrame({"Open":opens,"High":highs,"Low":lows,"Close":closes,"Volume":vols}, index=times)
-
-def fetch_data(pair: str, period: str = "2d", interval: str = "1m") -> pd.DataFrame:
-    try:
-        ticker = yf_symbol(pair)
-        df = yf.download(ticker, period=period, interval=interval, progress=False, threads=False)
-        if df is None or df.empty:
-            raise Exception("empty df")
-        if "Close" not in df.columns:
-            raise Exception("no Close")
-        df = df.dropna(subset=["Close"])
-        if df.empty:
-            raise Exception("empty after drop")
-        # coerce numeric types
-        for col in ["Open","High","Low","Close","Volume"]:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors="coerce")
-        df = df.dropna(subset=["Close"])
-        if df.empty:
-            raise Exception("close all NaN")
-        return df
-    except Exception as e:
-        print(f"[fetch_data] fallback for {pair}: {e}")
-        return simulate_series(pair)
+# ---------------- Fetch real data (yfinance only, with retries) ----------------
+def fetch_data_yf(pair: str, period: str = YF_PERIOD, interval: str = YF_INTERVAL, retries: int = 3, pause: float = 1.0) -> pd.DataFrame:
+    ticker = yf_symbol(pair)
+    last_err = None
+    for attempt in range(retries):
+        try:
+            df = yf.download(ticker, period=period, interval=interval, progress=False, threads=False)
+            if df is None or df.empty:
+                last_err = "empty"
+                time.sleep(pause)
+                continue
+            if "Close" not in df.columns:
+                last_err = "no Close"
+                time.sleep(pause)
+                continue
+            df = df.dropna(subset=["Close"])
+            if df.empty:
+                last_err = "dropna empty"
+                time.sleep(pause)
+                continue
+            # coerce numeric
+            for col in ["Open","High","Low","Close","Volume"]:
+                if col in df.columns:
+                    df[col] = pd.to_numeric(df[col], errors="coerce")
+            df = df.dropna(subset=["Close"])
+            if df.empty:
+                last_err = "close all NaN"
+                time.sleep(pause)
+                continue
+            return df
+        except Exception as e:
+            last_err = str(e)
+            time.sleep(pause)
+    # If we arrive here — return None to signal upstream that data not available
+    print(f"[fetch_data_yf] failed for {pair}: {last_err}")
+    return None
 
 # ---------------- Indicators ----------------
 def compute_indicators(df: pd.DataFrame) -> Dict[str, float]:
-    out: Dict[str, float] = {}
+    out = {}
     try:
         close = df["Close"].astype(float)
         high = df["High"].astype(float)
@@ -161,7 +162,7 @@ def compute_indicators(df: pd.DataFrame) -> Dict[str, float]:
         sma20 = close.rolling(window=min(20,n), min_periods=1).mean().iloc[-1]
         out["SMA"] = 1 if sma5 > sma20 else -1
 
-        # MACD and magnitude
+        # MACD
         ema12 = close.ewm(span=12, adjust=False).mean()
         ema26 = close.ewm(span=26, adjust=False).mean()
         macd = ema12 - ema26
@@ -179,7 +180,7 @@ def compute_indicators(df: pd.DataFrame) -> Dict[str, float]:
         out["_RSI"] = rsi_val
         out["RSI"] = 1 if rsi_val > 55 else (-1 if rsi_val < 45 else 0)
 
-        # Bollinger
+        # Bollinger Bands
         ma20 = close.rolling(window=min(20,n), min_periods=1).mean()
         std20 = close.rolling(window=min(20,n), min_periods=1).std().fillna(0)
         upper = ma20 + 2*std20
@@ -187,7 +188,7 @@ def compute_indicators(df: pd.DataFrame) -> Dict[str, float]:
         last = float(close.iloc[-1])
         out["BB"] = 1 if last < lower.iloc[-1] else (-1 if last > upper.iloc[-1] else 0)
 
-        # ATR (simple)
+        # ATR
         prev_close = close.shift(1).fillna(close.iloc[0])
         tr = pd.concat([high-low, (high-prev_close).abs(), (low-prev_close).abs()], axis=1).max(axis=1)
         out["ATR"] = float(tr.rolling(window=14, min_periods=1).mean().iloc[-1])
@@ -202,7 +203,7 @@ def compute_indicators(df: pd.DataFrame) -> Dict[str, float]:
         traceback.print_exc()
     return out
 
-# ---------------- Vote & confidence ----------------
+# ---------------- Voting & confidence ----------------
 def vote_and_confidence(ind: Dict[str, float]) -> Tuple[str, float]:
     score = 0.0
     max_score = 0.0
@@ -212,7 +213,6 @@ def vote_and_confidence(ind: Dict[str, float]) -> Tuple[str, float]:
         score += v * w
         max_score += abs(w)
     confidence = (abs(score) / max_score * 100) if max_score > 0 else 0.0
-    # small boost from MACD magnitude (trend strength)
     macd_mag = ind.get("MACD_mag", 0.0)
     confidence = confidence + min(10.0, macd_mag * 1000.0)
     confidence = max(0.0, min(99.9, confidence))
@@ -220,20 +220,13 @@ def vote_and_confidence(ind: Dict[str, float]) -> Tuple[str, float]:
     return direction, round(confidence, 1)
 
 # ---------------- Per-chat stats & locks ----------------
-chat_stats: Dict[int, Dict] = {}   # chat_id -> stats dict
+chat_stats: Dict[int, Dict] = {}   # chat_id -> stats
 locks: Dict[int, threading.Lock] = {}
 
 def get_stats(chat_id: int) -> Dict:
     st = chat_stats.get(chat_id)
     if not st:
-        st = {
-            "wins": 0,
-            "losses": 0,
-            "consec_wins": 0,
-            "consec_losses": 0,
-            "paused_until": None,
-            "last_signal_time": None
-        }
+        st = {"wins":0,"losses":0,"consec_wins":0,"consec_losses":0,"paused_until":None,"last_signal_time":None}
         chat_stats[chat_id] = st
     return st
 
@@ -242,8 +235,8 @@ def get_lock(chat_id: int) -> threading.Lock:
         locks[chat_id] = threading.Lock()
     return locks[chat_id]
 
-# ---------------- Keyboard helpers ----------------
-def make_page_keyboard(items, page: int, prefix: str) -> InlineKeyboardMarkup:
+# ---------------- Keyboards ----------------
+def make_page_keyboard(items, page, prefix):
     total = len(items)
     start = page * PAGE_SIZE
     end = min(total, start + PAGE_SIZE)
@@ -312,10 +305,8 @@ def callback_handler(update: Update, context: CallbackContext):
                 q.answer("Анализ уже идёт — подождите.", show_alert=True)
                 return
 
-            # send analyzing message and start thread
-            sent = q.edit_message_text(f"⏳ Подождите {ANALYSIS_WAIT} сек — идёт анализ {pair}...", parse_mode="Markdown")
-            thread = threading.Thread(target=analysis_worker, args=(context.bot, q.message.chat_id, sent.message_id, pair, exp, q.from_user.id, lock), daemon=True)
-            thread.start()
+            sent = q.edit_message_text(f"⏳ Подождите {ANALYSIS_WAIT} сек — идёт анализ {pair} ...", parse_mode="Markdown")
+            threading.Thread(target=analysis_worker, args=(context.bot, q.message.chat_id, sent.message_id, pair, exp, q.from_user.id, lock), daemon=True).start()
             return
 
         if data == "new_signal":
@@ -335,7 +326,7 @@ def callback_handler(update: Update, context: CallbackContext):
             threading.Thread(target=nfp_worker, args=(context.bot, q.message.chat_id, sent.message_id, q.from_user.id, lock), daemon=True).start()
             return
 
-        q.edit_message_text("Нераспознанная команда. Вернитесь в меню (/start).")
+        q.edit_message_text("Нераспознанная команда. Попробуйте /start.")
     except Exception as e:
         print("callback_handler error:", e)
         traceback.print_exc()
@@ -349,24 +340,26 @@ def analysis_worker(bot, chat_id: int, message_id: int, pair: str, exp: str, use
     stats = get_stats(chat_id)
     try:
         stats["last_signal_time"] = datetime.utcnow()
+        # wait before analysis (gives time to gather ticks)
         time.sleep(ANALYSIS_WAIT)
 
-        df = fetch_data(pair)
+        df = fetch_data_yf(pair)
         if df is None or df.empty:
-            bot.send_message(chat_id, "⚠️ Не удалось получить данные. Попробуйте позже.")
+            bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="⚠️ Не удалось получить данные (yfinance). Попробуйте позже.")
             return
 
         ind = compute_indicators(df)
         if not ind:
-            bot.send_message(chat_id, "⚠️ Недостаточно данных для анализа.")
+            bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="⚠️ Недостаточно данных для анализа.")
             return
 
         direction, conf = vote_and_confidence(ind)
 
-        # Compose short logic (5-8 pieces max)
+        # короткая логика (5-8 частей)
         expl = []
         expl.append("EMA8>EMA21" if ind.get("EMA",0)==1 else "EMA8<EMA21")
-        expl.append(f"RSI≈{int(ind.get('_RSI',50))}")
+        rsi_v = ind.get("_RSI",50)
+        expl.append(f"RSI≈{int(rsi_v)}")
         bb = ind.get("BB",0)
         if bb == 1:
             expl.append("Цена у нижней полосы BB")
@@ -375,7 +368,7 @@ def analysis_worker(bot, chat_id: int, message_id: int, pair: str, exp: str, use
         expl.append(f"MACD_mag={round(ind.get('MACD_mag',0),6)}")
         expl_text = "; ".join(expl[:5])
 
-        price_open = float(df["Close"].iloc[-1]) if not df.empty else 0.0
+        price_open = float(df["Close"].iloc[-1])
 
         text = (
             f"📊 *Анализ завершён*\n\n"
@@ -391,7 +384,6 @@ def analysis_worker(bot, chat_id: int, message_id: int, pair: str, exp: str, use
         except:
             bot.send_message(chat_id, text, parse_mode="Markdown")
 
-        # logging pending
         log_row({
             "timestamp": datetime.utcnow().isoformat(),
             "chat_id": chat_id,
@@ -427,8 +419,11 @@ def analysis_worker(bot, chat_id: int, message_id: int, pair: str, exp: str, use
 def finalize_worker(bot, chat_id: int, message_id: int, pair: str, exp: str, direction: str, conf: float, price_open: float, user_id: int):
     stats = get_stats(chat_id)
     try:
-        df2 = fetch_data(pair)
-        price_close = float(df2["Close"].iloc[-1]) if (df2 is not None and not df2.empty) else price_open
+        df2 = fetch_data_yf(pair)
+        if df2 is None or df2.empty:
+            price_close = price_open
+        else:
+            price_close = float(df2["Close"].iloc[-1])
 
         win = (direction.startswith("Вверх") and price_close > price_open) or (direction.startswith("Вниз") and price_close < price_open)
         result = "Плюс ✅" if win else "Минус ❌"
@@ -444,18 +439,17 @@ def finalize_worker(bot, chat_id: int, message_id: int, pair: str, exp: str, dir
                 stats["consec_wins"] = 0
         else:
             stats["losses"] = stats.get("losses",0) + 1
-            stats["consec_wins"] = 0
             stats["consec_losses"] = stats.get("consec_losses",0) + 1
+            stats["consec_wins"] = 0
 
         final_text = (
             f"✅ *Сделка завершена*\n\n"
             f"*{pair}* | Эксп: *{exp}*\n"
             f"*Сигнал:* *{direction}*    *Результат:* *{result}*\n"
-            f"*Уверенность:* *{conf}%*\n\n"
+            f"*Уверенность:* *{conf}%\n\n"
             f"_Открытие:_ `{price_open:.6f}`\n"
             f"_Закрытие:_ `{price_close:.6f}`"
         )
-
         if pause_text:
             final_text += f"\n\n{pause_text}"
 
@@ -472,7 +466,6 @@ def finalize_worker(bot, chat_id: int, message_id: int, pair: str, exp: str, dir
             except:
                 pass
 
-        # log final
         log_row({
             "timestamp": datetime.utcnow().isoformat(),
             "chat_id": chat_id,
@@ -490,13 +483,13 @@ def finalize_worker(bot, chat_id: int, message_id: int, pair: str, exp: str, dir
         print("finalize_worker error:", e)
         traceback.print_exc()
 
-# ---------------- NFP worker ----------------
+# ---------------- NFP worker (after news) ----------------
 def nfp_worker(bot, chat_id: int, message_id: int, user_id: int, lock: threading.Lock):
     try:
-        # small wait for feed to update after news
+        # short wait to allow market to reflect news
         time.sleep(3)
         pair = "EURUSD"
-        df = fetch_data(pair, period="1d", interval="1m")
+        df = fetch_data_yf(pair, period="1d", interval="1m")
         if df is None or df.empty:
             bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="⚠️ Не удалось получить данные для NFP.")
             return
@@ -508,7 +501,7 @@ def nfp_worker(bot, chat_id: int, message_id: int, user_id: int, lock: threading
 
         direction, conf = vote_and_confidence(ind)
 
-        # quick ATR compute for expiration suggestion
+        # ATR for expiration suggestion
         try:
             high = df["High"].astype(float); low = df["Low"].astype(float); prev = df["Close"].shift(1).fillna(df["Close"].iloc[0])
             tr = pd.concat([high-low, (high-prev).abs(), (low-prev).abs()], axis=1).max(axis=1)
@@ -558,13 +551,12 @@ def nfp_worker(bot, chat_id: int, message_id: int, user_id: int, lock: threading
         except:
             pass
 
-# ---------------- webhook cleanup ----------------
+# ---------------- Webhook cleanup ----------------
 def delete_webhook_on_start():
     try:
         if not BOT_TOKEN:
             return
-        url = f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook"
-        r = requests.get(url, timeout=5)
+        r = requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook", timeout=5)
         print("deleteWebhook:", r.status_code, r.text[:200])
     except Exception as e:
         print("delete_webhook error:", e)
@@ -572,7 +564,7 @@ def delete_webhook_on_start():
 # ---------------- Entrypoint ----------------
 def main():
     if not BOT_TOKEN:
-        print("ERROR: BOT_TOKEN is empty. Set BOT_TOKEN in environment variables.")
+        print("ERROR: BOT_TOKEN is empty. Set in environment variables.")
         return
 
     ensure_log()
@@ -584,7 +576,7 @@ def main():
     dp.add_handler(CommandHandler("start", cmd_start))
     dp.add_handler(CallbackQueryHandler(callback_handler))
 
-    print("OXTSIGNALSBOT PRO started (polling)")
+    print("OXTSIGNALSBOT PRO (yfinance 1m) started (polling)")
     updater.start_polling()
     updater.idle()
 
