@@ -1,5 +1,5 @@
 # main.py
-# OXTSIGNALSBOT PRO MAX (Webhook) + Statistics + History
+# OXTSIGNALSBOT PRO MAX (Webhook) + Statistics + History + Candle Patterns + Volatility Filter
 # Do NOT hardcode BOT_TOKEN. Use environment variables.
 
 import os
@@ -36,16 +36,19 @@ FOREX = [
 
 EXPIRATIONS = ["1m","2m","3m","5m"]
 PAGE_SIZE = 6
-ANALYSIS_WAIT = 12  # seconds to simulate "professional" analysis
+ANALYSIS_WAIT = 10  # seconds to simulate "professional" analysis; shorter for more signals (variant B)
 
-# thresholds / tuning
-MIN_ATR = 0.00008
-MAX_ATR = 0.01
-MAX_STD_MA_RATIO = 0.0007
+# thresholds / tuning (tweakable)
+MIN_ATR = 0.00003   # lowered to allow more signals (variant B) but keep minimum
+MAX_ATR = 0.02
+MAX_STD_MA_RATIO = 0.0009
 HIGH_QUALITY = 75.0
 MEDIUM_QUALITY = 55.0
 
-GOOD_HOURS_UTC = [(7,22)]  # preferred trading window (UTC)
+GOOD_HOURS_UTC = [(6,22)]  # preferred trading window (UTC); wide to allow more signals
+
+# Tail / wick thresholds (relative to candle size)
+WICK_TO_BODY_RATIO = 1.5
 
 # ---------------- FLASK + TELEGRAM DISPATCHER ----------------
 app = Flask(__name__)
@@ -247,6 +250,11 @@ def compute_indicators(df: pd.DataFrame) -> Dict[str, float]:
         out["last_close"] = float(close.iloc[-1])
         out["prev_open"] = float(df["Open"].iloc[-2]) if "Open" in df.columns and len(df) >= 2 else out["last_open"]
         out["prev_close"] = float(df["Close"].iloc[-2]) if len(df) >=2 else out["last_close"]
+        # also keep last high/low
+        out["last_high"] = float(df["High"].iloc[-1]) if "High" in df.columns else out["last_close"]
+        out["last_low"] = float(df["Low"].iloc[-1]) if "Low" in df.columns else out["last_close"]
+        out["prev_high"] = float(df["High"].iloc[-2]) if "High" in df.columns and len(df) >=2 else out["last_high"]
+        out["prev_low"] = float(df["Low"].iloc[-2]) if "Low" in df.columns and len(df) >=2 else out["last_low"]
 
     except Exception as e:
         print("compute_indicators error:", e)
@@ -254,28 +262,102 @@ def compute_indicators(df: pd.DataFrame) -> Dict[str, float]:
     return out
 
 
-# ---------------- Candle patterns (simple) ----------------
-def detect_candle_pattern(ind: Dict[str, float]) -> Optional[str]:
+# ---------------- Candle patterns (expanded) ----------------
+def is_doji(o, c, h, l, thresh=0.0015):
+    # relative body small vs range
+    body = abs(c - o)
+    rng = h - l if (h - l) != 0 else 1e-9
+    return body / rng < thresh
+
+def is_pinbar(o, c, h, l):
+    body = abs(c - o)
+    upper_wick = h - max(c, o)
+    lower_wick = min(c, o) - l
+    # pinbar: one wick >> body and other wick small
+    if body == 0:
+        body = 1e-9
+    if upper_wick / body > WICK_TO_BODY_RATIO and lower_wick / body < 0.6:
+        return "pinbar_bear"  # long upper wick -> bearish
+    if lower_wick / body > WICK_TO_BODY_RATIO and upper_wick / body < 0.6:
+        return "pinbar_bull"  # long lower wick -> bullish
+    return None
+
+def is_hammer(o, c, h, l):
+    body = abs(c - o)
+    lower_wick = min(c, o) - l
+    upper_wick = h - max(c, o)
+    if body == 0:
+        body = 1e-9
+    # hammer: small body near top, long lower wick
+    if lower_wick / body > 2.0 and upper_wick / body < 0.5:
+        if c > o:
+            return "hammer_bull"
+        else:
+            return "hanging_man"  # similar structure but bearish
+    return None
+
+def is_engulfing(o_prev, c_prev, o, c):
+    # Bullish engulfing: prev bearish (c_prev<o_prev), current bullish (c>o) and current body engulfs prev body
+    if (c_prev < o_prev) and (c > o) and (c - o > o_prev - c_prev):
+        return "engulfing_bull"
+    # Bearish engulfing
+    if (c_prev > o_prev) and (c < o) and (o - c > c_prev - o_prev):
+        return "engulfing_bear"
+    return None
+
+def detect_patterns_full(df: pd.DataFrame) -> Optional[str]:
+    """
+    Detect patterns using last 3 candles.
+    Returns pattern name or None.
+    """
     try:
-        o = ind.get("last_open")
-        c = ind.get("last_close")
-        po = ind.get("prev_open")
-        pc = ind.get("prev_close")
-        if o is None or c is None or po is None or pc is None:
+        if df is None or df.empty or len(df) < 3:
             return None
-        body = abs(c - o)
-        prev_body = abs(pc - po)
-        # Engulfing
-        if (c > o and pc < po and c > po and o < pc) or (c < o and pc > po and c < po and o > pc):
-            return "engulfing"
-        # Pinbar / long shadow detection (approx)
-        rng = abs(ind.get("last_close", c) - ind.get("last_open", o))
-        if rng > 0 and body < 0.35 * (abs(ind.get("last_close", c) - ind.get("prev_close", pc)) + 1e-9):
-            return "pinbar"
-        # Hammer (small body, long lower shadow)
-        return None
-    except Exception:
-        return None
+        # take last 3 candles
+        last = df.iloc[-1]
+        prev = df.iloc[-2]
+        prev2 = df.iloc[-3]
+
+        o, h, l, c = float(last["Open"]), float(last["High"]), float(last["Low"]), float(last["Close"])
+        po, ph, pl, pc = float(prev["Open"]), float(prev["High"]), float(prev["Low"]), float(prev["Close"])
+        p2o, p2h, p2l, p2c = float(prev2["Open"]), float(prev2["High"]), float(prev2["Low"]), float(prev2["Close"])
+
+        # Doji
+        if is_doji(o, c, h, l):
+            return "doji"
+
+        # Engulfing (use last and prev)
+        eng = is_engulfing(po, pc, o, c)
+        if eng:
+            return eng  # engulfing_bull or engulfing_bear
+
+        # Pinbar
+        pin = is_pinbar(o, c, h, l)
+        if pin:
+            return pin
+
+        # Hammer / Hanging man
+        ham = is_hammer(o, c, h, l)
+        if ham:
+            return ham
+
+        # Morning / Evening star (simple heuristic)
+        # morning star: big bearish, small indec, bullish -> bullish signal
+        big1 = (p2c < p2o and abs(p2c - p2o) > 0.001)
+        small2 = abs(pc - po) < abs(p2c - p2o) * 0.5
+        big3 = (c > o and abs(c - o) > abs(p2c - p2o) * 0.8)
+        if big1 and small2 and big3:
+            return "morning_star"
+        # evening star
+        big1b = (p2c > p2o and abs(p2c - p2o) > 0.001)
+        small2b = abs(pc - po) < abs(p2c - p2o) * 0.5
+        big3b = (c < o and abs(c - o) > abs(p2c - p2o) * 0.8)
+        if big1b and small2b and big3b:
+            return "evening_star"
+
+    except Exception as e:
+        print("detect_patterns_full error:", e)
+    return None
 
 
 # ---------------- Trend power & macd quality ----------------
@@ -330,16 +412,32 @@ def compute_quality_label_and_score(ind: Dict[str, float], base_conf: float) -> 
     return label, round(quality_score, 1)
 
 
-# ---------------- NO-FLAT / ATR checks ----------------
-def is_flat_or_bad_vol(ind: Dict[str, float]) -> Tuple[bool, str]:
+# ---------------- NO-FLAT / ATR checks (enhanced) ----------------
+def is_flat_or_bad_vol(ind: Dict[str, float], df: Optional[pd.DataFrame] = None) -> Tuple[bool, str]:
     std_ma = ind.get("STD_MA", 0.0)
     atr = ind.get("ATR", 0.0)
+    # flat by std/ma
     if std_ma is not None and std_ma < MAX_STD_MA_RATIO:
         return True, "flat_std"
+    # low atr
     if atr is not None and atr < MIN_ATR:
         return True, "low_atr"
+    # too high atr (explosion)
     if atr is not None and atr > MAX_ATR:
         return True, "high_atr"
+    # check very long wicks (last candle)
+    if df is not None and len(df) >= 1:
+        last = df.iloc[-1]
+        o, h, l, c = float(last["Open"]), float(last["High"]), float(last["Low"]), float(last["Close"])
+        body = abs(c - o)
+        rng = h - l if (h - l) != 0 else 1e-9
+        upper_wick = h - max(c, o)
+        lower_wick = min(c, o) - l
+        # if one of the wicks is huge relative to body and range -> noisy
+        if body == 0:
+            body = 1e-9
+        if (upper_wick / body > 8.0) or (lower_wick / body > 8.0) or (rng / max(abs(c), abs(o), 1e-9) > 0.01):
+            return True, "long_wick_noise"
     return False, ""
 
 
@@ -444,28 +542,34 @@ def analysis_worker(bot, chat_id: int, message_id: int, pair: str, exp: str, use
             bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="⚠️ Недостаточно данных для анализа.")
             return
 
-        flat, reason = is_flat_or_bad_vol(ind)
+        # detect patterns using raw df (better accuracy)
+        patt = detect_patterns_full(df)
+
+        flat, reason = is_flat_or_bad_vol(ind, df)
         direction, base_conf = vote_and_base_confidence(ind)
         quality_label, quality_score = compute_quality_label_and_score(ind, base_conf)
-        patt = detect_candle_pattern(ind)
 
-        # Adjust quality by pattern & time
-        if patt == "engulfing":
-            quality_score = min(99.9, quality_score + 8)
-        elif patt == "pinbar":
-            quality_score = min(99.9, quality_score + 5)
+        # Pattern effects (variant B: many signals but boost on clear patterns)
+        if patt:
+            # Engulfing and hammer/pinbar strengthen
+            if patt.startswith("engulfing") or "pinbar" in patt or "hammer" in patt or patt in ("morning_star","evening_star"):
+                quality_score = min(99.9, quality_score + 12.0)  # stronger signal
+            elif patt == "doji":
+                # doji -> reduce quality (uncertainty)
+                quality_score = max(10.0, quality_score - 12.0)
 
+        # Time-based penalty if outside good hours
         if not in_good_hours():
-            quality_score = max(10.0, quality_score - 12.0)
+            quality_score = max(10.0, quality_score - 10.0)
             if quality_score < MEDIUM_QUALITY:
                 quality_label = "Low"
 
-        # If flat or bad vol -> recommend skip
+        # If flat or bad vol -> recommend skip (don't give false signals)
         if flat:
             text = (
                 f"⚠️ Рынок неподходящий ({reason}). Рекомендуется воздержаться.\n\n"
                 f"Пара: *{pair}* | Эксп: *{exp}*\n"
-                f"Технический сигнал: *{direction}* • Качество: *{quality_label}* ({quality_score}%)"
+                f"Технический сигнал (без входа): *{direction}* • Качество: *{quality_label}* ({quality_score}%)"
             )
             bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text, parse_mode="Markdown")
             # log skipped
@@ -486,9 +590,19 @@ def analysis_worker(bot, chat_id: int, message_id: int, pair: str, exp: str, use
             bot.send_message(chat_id, "🔁 Возвращаю в меню валютных пар:", reply_markup=main_menu_keyboard())
             return
 
-        # suggested expiration logic
+        # suggested expiration logic (slightly more aggressive in variant B)
         tp, mq = trend_power_and_macd_quality(ind)
-        suggested = "1m" if tp > 0.8 and ind.get("ATR",0) > MIN_ATR else ("2m" if tp > 0.35 else "3m")
+        suggested = "1m" if tp > 0.65 and ind.get("ATR",0) > MIN_ATR else ("2m" if tp > 0.25 else "3m")
+
+        # final direction adjustment: if pattern strongly contradicts indicators -> lower confidence or cancel
+        if patt:
+            if patt == "engulfing_bull" and direction.startswith("Вниз"):
+                # contradiction: cancel or reduce
+                quality_score = max(10.0, quality_score - 20.0)
+            if patt == "engulfing_bear" and direction.startswith("Вверх"):
+                quality_score = max(10.0, quality_score - 20.0)
+            if patt == "doji":
+                quality_score = max(10.0, quality_score - 25.0)
 
         price_open = float(df["Close"].iloc[-1])
 
@@ -504,7 +618,7 @@ def analysis_worker(bot, chat_id: int, message_id: int, pair: str, exp: str, use
         text = (
             f"📊 *Анализ завершён*\n\n"
             f"🔹 {pair} | Эксп: {exp}\n"
-            f"📈 *Сигнал:* *{direction}*    🎯 *Качество:* *{quality_label}* ({quality_score}%)\n"
+            f"📈 *Сигнал:* *{direction}*    🎯 *Качество:* *{quality_label}* ({round(quality_score,1)}%)\n"
             f"⏱ *Рекомендуемая экспирация:* *{suggested}*\n\n"
             f"_Короткая логика:_ {expl_text}\n"
             f"_Цена (прибл.):_ `{price_open:.6f}`\n\n"
@@ -525,7 +639,7 @@ def analysis_worker(bot, chat_id: int, message_id: int, pair: str, exp: str, use
             "expiration": exp,
             "signal": direction,
             "quality": quality_label,
-            "confidence": quality_score,
+            "confidence": round(quality_score,1),
             "price_open": price_open,
             "price_close": "",
             "result": "pending"
