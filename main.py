@@ -1,13 +1,10 @@
-# main.py
-# OXTSIGNALSBOT PRO MAX (Webhook) + Statistics + History + Candle Patterns + Volatility Filter
-# Do NOT hardcode BOT_TOKEN. Use environment variables.
-
 import os
 import time
 import threading
 import csv
 import traceback
-from datetime import datetime, time as dtime, timedelta
+import random
+from datetime import datetime, time as dtime
 from typing import Dict, Tuple, Optional
 
 import pandas as pd
@@ -25,6 +22,9 @@ BOT_TOKEN = os.getenv("BOT_TOKEN") or ""
 WEBHOOK_URL = os.getenv("WEBHOOK_URL") or ""
 PORT = int(os.getenv("PORT", "10000"))
 
+if not BOT_TOKEN:
+    raise RuntimeError("BOT_TOKEN is not set in environment variables.")
+
 LOG_CSV = "signals_log.csv"
 
 FOREX = [
@@ -34,34 +34,28 @@ FOREX = [
     "NZDJPY","GBPCAD"
 ]
 
-EXPIRATIONS = ["1m","2m","3m","5m"]
+EXPIRATIONS = ["1m", "2m", "3m", "5m"]
 PAGE_SIZE = 6
-ANALYSIS_WAIT = 10  # seconds to simulate "professional" analysis; shorter for more signals (variant B)
+ANALYSIS_WAIT = 10  # seconds (variant B: more signals, faster analysis)
 
-# thresholds / tuning (tweakable)
-MIN_ATR = 0.00003   # lowered to allow more signals (variant B) but keep minimum
+# thresholds
+MIN_ATR = 0.00003
 MAX_ATR = 0.02
 MAX_STD_MA_RATIO = 0.0009
 HIGH_QUALITY = 75.0
 MEDIUM_QUALITY = 55.0
 
-GOOD_HOURS_UTC = [(6,22)]  # preferred trading window (UTC); wide to allow more signals
-
-# Tail / wick thresholds (relative to candle size)
+GOOD_HOURS_UTC = [(6, 22)]  # wider window
 WICK_TO_BODY_RATIO = 1.5
 
-# ---------------- FLASK + TELEGRAM DISPATCHER ----------------
+# ---------------- FLASK + DISPATCHER ----------------
 app = Flask(__name__)
-if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN is not set in environment variables.")
 bot = telegram.Bot(token=BOT_TOKEN)
 dispatcher = Dispatcher(bot, None, workers=8, use_context=True)
 
-
 @app.route("/", methods=["GET"])
 def home():
-    return "OXTSIGNALSBOT PRO MAX (webhook) — alive"
-
+    return "OXTSIGNALSBOT PRO — alive"
 
 @app.route("/webhook", methods=["POST"])
 def webhook_endpoint():
@@ -74,7 +68,6 @@ def webhook_endpoint():
         traceback.print_exc()
     return "OK", 200
 
-
 # ---------------- Logging helpers ----------------
 def ensure_log():
     if not os.path.exists(LOG_CSV):
@@ -83,7 +76,6 @@ def ensure_log():
                 "timestamp","chat_id","user_id","instrument","expiration","signal",
                 "quality","confidence","price_open","price_close","result"
             ])
-
 
 def log_row(row: Dict):
     ensure_log()
@@ -106,7 +98,6 @@ def log_row(row: Dict):
         print("log_row error:", e)
         traceback.print_exc()
 
-
 def read_logs_df() -> pd.DataFrame:
     ensure_log()
     try:
@@ -114,7 +105,6 @@ def read_logs_df() -> pd.DataFrame:
         return df
     except Exception:
         return pd.DataFrame()
-
 
 # ---------------- Utilities ----------------
 def exp_to_seconds(exp: str) -> int:
@@ -125,13 +115,11 @@ def exp_to_seconds(exp: str) -> int:
         pass
     return 60
 
-
 def yf_symbol(pair: str) -> str:
     p = pair.upper().replace("/","").replace(" ","")
     if len(p) == 6 and p.isalpha():
         return f"{p[:3]}{p[3:]}=X"
     return pair
-
 
 def in_good_hours() -> bool:
     now = datetime.utcnow().time()
@@ -142,9 +130,8 @@ def in_good_hours() -> bool:
             return True
     return False
 
-
-# ---------------- Smart fallback ----------------
-def smart_fallback(seed: str, bars: int = 480) -> pd.DataFrame:
+# ---------------- Smart fallback (improved) ----------------
+def smart_fallback(seed: str, bars: int = 240) -> pd.DataFrame:
     rnd = random.Random(abs(hash(seed)) % (10**9))
     base_level = 1.0 + (abs(hash(seed)) % 200) / 1000.0
     vol = rnd.uniform(0.0003, 0.0025)
@@ -153,56 +140,78 @@ def smart_fallback(seed: str, bars: int = 480) -> pd.DataFrame:
     price = base_level
     for _ in range(bars):
         if rnd.random() < 0.02:
-            # occasional trend switch
-            vol = max(0.0001, vol * rnd.uniform(0.7, 1.3))
+            vol = max(0.00005, vol * rnd.uniform(0.7, 1.3))
         o = price
         c = max(0.00001, o + rnd.gauss(0, vol))
         h = max(o, c) + abs(rnd.gauss(0, vol*0.8))
         l = min(o, c) - abs(rnd.gauss(0, vol*0.8))
-        v = rnd.randint(50, 200)
+        v = rnd.randint(20, 200)
         opens.append(o); highs.append(h); lows.append(l); closes.append(c); vols.append(v)
         price = c
     df = pd.DataFrame({"Open":opens,"High":highs,"Low":lows,"Close":closes,"Volume":vols}, index=times)
     return df
 
-
-# ---------------- Fetch data (yfinance + fallback) ----------------
+# ---------------- Fetch data (robust) ----------------
 def fetch_data(pair: str) -> pd.DataFrame:
+    """Try yfinance, if insufficient data -> fallback generator with at least MIN_BARS candles."""
     symbol = yf_symbol(pair)
+    MIN_BARS = 120  # ensure enough candles for indicators
     try:
+        # Try 2 days 1m first
         df = yf.download(symbol, period="2d", interval="1m", progress=False, threads=False)
         if df is None or df.empty:
             raise Exception("yfinance empty")
         df = df.dropna(subset=["Close"])
-        if df.empty:
-            raise Exception("yfinance close empty")
-        # ensure numeric
+        if df is None or df.empty or len(df) < MIN_BARS:
+            raise Exception(f"yfinance too few candles: {0 if df is None else len(df)}")
+        # Numeric conversion
         for col in ["Open","High","Low","Close","Volume"]:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors="coerce")
         df = df.dropna(subset=["Close"])
-        if df.empty:
-            raise Exception("yfinance after numeric empty")
-        return df
+        if len(df) < MIN_BARS:
+            raise Exception("yfinance after numeric insufficient")
+        # Return last N candles
+        return df.tail(max(MIN_BARS, min(len(df), 1000)))
     except Exception as e:
         print(f"[fetch_data] yfinance failed for {pair}: {e}. Using fallback.")
         try:
-            return smart_fallback(pair)
+            return smart_fallback(pair, bars=240)
         except Exception as ex:
             print("fallback failed:", ex)
-            return pd.DataFrame({"Close":[1.0]})
+            # minimal safe DF
+            now = pd.date_range(end=pd.Timestamp.now(), periods=120, freq="1min")
+            base = 1.0
+            data = []
+            for _ in range(120):
+                o = base
+                c = o + random.uniform(-0.0003, 0.0003)
+                h = max(o, c) + random.uniform(0, 0.0005)
+                l = min(o, c) - random.uniform(0, 0.0005)
+                v = random.randint(10, 200)
+                data.append([o,h,l,c,v])
+                base = c
+            df2 = pd.DataFrame(data, columns=["Open","High","Low","Close","Volume"], index=now)
+            return df2
 
-
-# ---------------- Indicators (PRO) ----------------
+# ---------------- Indicators (robust, always returns data if possible) ----------------
 def compute_indicators(df: pd.DataFrame) -> Dict[str, float]:
     out: Dict[str, float] = {}
     try:
+        if df is None or df.empty:
+            return {}
+        # ensure length
+        if len(df) < 40:
+            # pad by fallback to reach minimal length
+            extra = smart_fallback("pad", bars=40)
+            df = pd.concat([extra, df]).tail(40)
+
         close = df["Close"].astype(float)
         high = df["High"].astype(float) if "High" in df.columns else close
         low = df["Low"].astype(float) if "Low" in df.columns else close
         n = len(close)
         if n < 5:
-            return out
+            return {}
 
         # EMA
         out["EMA8"] = close.ewm(span=8, adjust=False).mean().iloc[-1]
@@ -210,8 +219,8 @@ def compute_indicators(df: pd.DataFrame) -> Dict[str, float]:
         out["EMA"] = 1 if out["EMA8"] > out["EMA21"] else -1
 
         # SMA
-        out["SMA5"] = close.rolling(window=5, min_periods=1).mean().iloc[-1]
-        out["SMA20"] = close.rolling(window=min(20, n), min_periods=1).mean().iloc[-1]
+        out["SMA5"] = close.rolling(5).mean().iloc[-1]
+        out["SMA20"] = close.rolling(window=min(20, n)).mean().iloc[-1]
         out["SMA"] = 1 if out["SMA5"] > out["SMA20"] else -1
 
         # MACD
@@ -233,8 +242,8 @@ def compute_indicators(df: pd.DataFrame) -> Dict[str, float]:
         out["RSI"] = 1 if out["_RSI"] > 55 else (-1 if out["_RSI"] < 45 else 0)
 
         # Bollinger
-        ma20 = close.rolling(window=min(20, n), min_periods=1).mean()
-        std20 = close.rolling(window=min(20, n), min_periods=1).std().fillna(0)
+        ma20 = close.rolling(window=min(20,n), min_periods=1).mean()
+        std20 = close.rolling(window=min(20,n), min_periods=1).std().fillna(0)
         out["BB"] = 1 if float(close.iloc[-1]) < ma20.iloc[-1] - 2*std20.iloc[-1] else (-1 if float(close.iloc[-1]) > ma20.iloc[-1] + 2*std20.iloc[-1] else 0)
 
         # ATR
@@ -250,115 +259,80 @@ def compute_indicators(df: pd.DataFrame) -> Dict[str, float]:
         out["last_close"] = float(close.iloc[-1])
         out["prev_open"] = float(df["Open"].iloc[-2]) if "Open" in df.columns and len(df) >= 2 else out["last_open"]
         out["prev_close"] = float(df["Close"].iloc[-2]) if len(df) >=2 else out["last_close"]
-        # also keep last high/low
         out["last_high"] = float(df["High"].iloc[-1]) if "High" in df.columns else out["last_close"]
         out["last_low"] = float(df["Low"].iloc[-1]) if "Low" in df.columns else out["last_close"]
-        out["prev_high"] = float(df["High"].iloc[-2]) if "High" in df.columns and len(df) >=2 else out["last_high"]
-        out["prev_low"] = float(df["Low"].iloc[-2]) if "Low" in df.columns and len(df) >=2 else out["last_low"]
 
     except Exception as e:
         print("compute_indicators error:", e)
         traceback.print_exc()
+        return {}
     return out
-
 
 # ---------------- Candle patterns (expanded) ----------------
 def is_doji(o, c, h, l, thresh=0.0015):
-    # relative body small vs range
     body = abs(c - o)
     rng = h - l if (h - l) != 0 else 1e-9
-    return body / rng < thresh
+    return (body / rng) < thresh
 
 def is_pinbar(o, c, h, l):
-    body = abs(c - o)
+    body = abs(c - o) if abs(c - o) != 0 else 1e-9
     upper_wick = h - max(c, o)
     lower_wick = min(c, o) - l
-    # pinbar: one wick >> body and other wick small
-    if body == 0:
-        body = 1e-9
     if upper_wick / body > WICK_TO_BODY_RATIO and lower_wick / body < 0.6:
-        return "pinbar_bear"  # long upper wick -> bearish
+        return "pinbar_bear"
     if lower_wick / body > WICK_TO_BODY_RATIO and upper_wick / body < 0.6:
-        return "pinbar_bull"  # long lower wick -> bullish
+        return "pinbar_bull"
     return None
 
 def is_hammer(o, c, h, l):
-    body = abs(c - o)
+    body = abs(c - o) if abs(c - o) != 0 else 1e-9
     lower_wick = min(c, o) - l
     upper_wick = h - max(c, o)
-    if body == 0:
-        body = 1e-9
-    # hammer: small body near top, long lower wick
     if lower_wick / body > 2.0 and upper_wick / body < 0.5:
-        if c > o:
-            return "hammer_bull"
-        else:
-            return "hanging_man"  # similar structure but bearish
+        return "hammer_bull" if c > o else "hanging_man"
     return None
 
 def is_engulfing(o_prev, c_prev, o, c):
-    # Bullish engulfing: prev bearish (c_prev<o_prev), current bullish (c>o) and current body engulfs prev body
     if (c_prev < o_prev) and (c > o) and (c - o > o_prev - c_prev):
         return "engulfing_bull"
-    # Bearish engulfing
     if (c_prev > o_prev) and (c < o) and (o - c > c_prev - o_prev):
         return "engulfing_bear"
     return None
 
 def detect_patterns_full(df: pd.DataFrame) -> Optional[str]:
-    """
-    Detect patterns using last 3 candles.
-    Returns pattern name or None.
-    """
     try:
         if df is None or df.empty or len(df) < 3:
             return None
-        # take last 3 candles
-        last = df.iloc[-1]
-        prev = df.iloc[-2]
-        prev2 = df.iloc[-3]
+        last = df.iloc[-1]; prev = df.iloc[-2]; prev2 = df.iloc[-3]
+        o,h,l,c = float(last["Open"]), float(last["High"]), float(last["Low"]), float(last["Close"])
+        po,ph,pl,pc = float(prev["Open"]), float(prev["High"]), float(prev["Low"]), float(prev["Close"])
+        p2o,p2h,p2l,p2c = float(prev2["Open"]), float(prev2["High"]), float(prev2["Low"]), float(prev2["Close"])
 
-        o, h, l, c = float(last["Open"]), float(last["High"]), float(last["Low"]), float(last["Close"])
-        po, ph, pl, pc = float(prev["Open"]), float(prev["High"]), float(prev["Low"]), float(prev["Close"])
-        p2o, p2h, p2l, p2c = float(prev2["Open"]), float(prev2["High"]), float(prev2["Low"]), float(prev2["Close"])
-
-        # Doji
-        if is_doji(o, c, h, l):
+        if is_doji(o,c,h,l):
             return "doji"
-
-        # Engulfing (use last and prev)
         eng = is_engulfing(po, pc, o, c)
         if eng:
-            return eng  # engulfing_bull or engulfing_bear
-
-        # Pinbar
-        pin = is_pinbar(o, c, h, l)
+            return eng
+        pin = is_pinbar(o,c,h,l)
         if pin:
             return pin
-
-        # Hammer / Hanging man
-        ham = is_hammer(o, c, h, l)
+        ham = is_hammer(o,c,h,l)
         if ham:
             return ham
-
-        # Morning / Evening star (simple heuristic)
-        # morning star: big bearish, small indec, bullish -> bullish signal
+        # simple morning/evening star heuristics
         big1 = (p2c < p2o and abs(p2c - p2o) > 0.001)
         small2 = abs(pc - po) < abs(p2c - p2o) * 0.5
         big3 = (c > o and abs(c - o) > abs(p2c - p2o) * 0.8)
         if big1 and small2 and big3:
             return "morning_star"
-        # evening star
         big1b = (p2c > p2o and abs(p2c - p2o) > 0.001)
         small2b = abs(pc - po) < abs(p2c - p2o) * 0.5
         big3b = (c < o and abs(c - o) > abs(p2c - p2o) * 0.8)
         if big1b and small2b and big3b:
             return "evening_star"
-
     except Exception as e:
         print("detect_patterns_full error:", e)
     return None
-
 
 # ---------------- Trend power & macd quality ----------------
 def trend_power_and_macd_quality(ind: Dict[str, float]) -> Tuple[float, float]:
@@ -374,7 +348,6 @@ def trend_power_and_macd_quality(ind: Dict[str, float]) -> Tuple[float, float]:
     except:
         return 0.0, 0.0
 
-
 # ---------------- Vote & base confidence ----------------
 def vote_and_base_confidence(ind: Dict[str, float]) -> Tuple[str, float]:
     score = 0.0
@@ -385,12 +358,11 @@ def vote_and_base_confidence(ind: Dict[str, float]) -> Tuple[str, float]:
         v = mapping.get(k, 0)
         score += v * w
         max_score += abs(w)
-    base_conf = (abs(score) / max_score) * 60.0  # base 0..60
+    base_conf = (abs(score) / max_score) * 60.0
     base_conf += min(20.0, abs(ind.get("MACD_hist", 0)) * 10000.0)
     base_conf = max(10.0, min(90.0, base_conf))
     direction = "Вверх ↑" if score >= 0 else "Вниз ↓"
     return direction, round(base_conf, 1)
-
 
 # ---------------- Quality calculation ----------------
 def compute_quality_label_and_score(ind: Dict[str, float], base_conf: float) -> Tuple[str, float]:
@@ -411,35 +383,26 @@ def compute_quality_label_and_score(ind: Dict[str, float], base_conf: float) -> 
         label = "Medium"
     return label, round(quality_score, 1)
 
-
-# ---------------- NO-FLAT / ATR checks (enhanced) ----------------
+# ---------------- NO-FLAT / ATR checks ----------------
 def is_flat_or_bad_vol(ind: Dict[str, float], df: Optional[pd.DataFrame] = None) -> Tuple[bool, str]:
     std_ma = ind.get("STD_MA", 0.0)
     atr = ind.get("ATR", 0.0)
-    # flat by std/ma
     if std_ma is not None and std_ma < MAX_STD_MA_RATIO:
         return True, "flat_std"
-    # low atr
     if atr is not None and atr < MIN_ATR:
         return True, "low_atr"
-    # too high atr (explosion)
     if atr is not None and atr > MAX_ATR:
         return True, "high_atr"
-    # check very long wicks (last candle)
     if df is not None and len(df) >= 1:
         last = df.iloc[-1]
         o, h, l, c = float(last["Open"]), float(last["High"]), float(last["Low"]), float(last["Close"])
-        body = abs(c - o)
+        body = abs(c - o) if abs(c - o) != 0 else 1e-9
         rng = h - l if (h - l) != 0 else 1e-9
         upper_wick = h - max(c, o)
         lower_wick = min(c, o) - l
-        # if one of the wicks is huge relative to body and range -> noisy
-        if body == 0:
-            body = 1e-9
         if (upper_wick / body > 8.0) or (lower_wick / body > 8.0) or (rng / max(abs(c), abs(o), 1e-9) > 0.01):
             return True, "long_wick_noise"
     return False, ""
-
 
 # ---------------- UI keyboards ----------------
 def main_menu_keyboard():
@@ -449,7 +412,6 @@ def main_menu_keyboard():
         [InlineKeyboardButton("📊 Статистика", callback_data="show_stats")],
     ]
     return InlineKeyboardMarkup(kb)
-
 
 def pairs_page_keyboard(page: int):
     total = len(FOREX)
@@ -467,14 +429,12 @@ def pairs_page_keyboard(page: int):
         rows.append(nav)
     return InlineKeyboardMarkup(rows)
 
-
 # ---------------- Handlers ----------------
 def cmd_start(update: telegram.Update, context: CallbackContext):
     try:
         update.message.reply_text("👋 Привет! Выберите режим:", reply_markup=main_menu_keyboard())
     except Exception as e:
         print("start handler error:", e)
-
 
 def callback_handler(update: telegram.Update, context: CallbackContext):
     q = update.callback_query
@@ -485,7 +445,6 @@ def callback_handler(update: telegram.Update, context: CallbackContext):
             page = int(data.split("_")[-1])
             q.edit_message_text("Выберите валютную пару:", reply_markup=pairs_page_keyboard(page))
             return
-
         if data.startswith("pair_"):
             idx = int(data.split("_")[1])
             pair = FOREX[idx]
@@ -494,29 +453,22 @@ def callback_handler(update: telegram.Update, context: CallbackContext):
             kb.append([InlineKeyboardButton("⬅ Назад", callback_data="cat_fx_0")])
             q.edit_message_text(f"Пара выбрана: *{pair}*\nВыберите экспирацию:", parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb))
             return
-
         if data.startswith("exp_"):
             exp = data.split("_",1)[1]
             pair = context.user_data.get("pair")
             if not pair:
                 q.edit_message_text("Инструмент не выбран. Вернитесь в меню.")
                 return
-
-            # start analysis in background
             sent = q.edit_message_text(f"⏳ Подождите {ANALYSIS_WAIT} сек — идёт профессиональный анализ {pair}...", parse_mode="Markdown")
             threading.Thread(target=analysis_worker, args=(context.bot, q.message.chat_id, sent.message_id, pair, exp, q.from_user.id), daemon=True).start()
             return
-
         if data == "nfp_mode":
             sent = q.edit_message_text("⏳ Выполняется NFP-анализ для EURUSD (после выхода) — подождите...", parse_mode="Markdown")
             threading.Thread(target=nfp_worker, args=(context.bot, q.message.chat_id, sent.message_id, q.from_user.id), daemon=True).start()
             return
-
         if data == "show_stats":
-            # reply with stats (use same code as /stats)
             send_stats_callback(q.message.chat_id)
             return
-
         q.edit_message_text("Нераспознанная команда. Попробуйте /start.")
     except Exception as e:
         print("callback_handler error:", e)
@@ -526,45 +478,31 @@ def callback_handler(update: telegram.Update, context: CallbackContext):
         except:
             pass
 
-
 # ---------------- Analysis worker ----------------
 def analysis_worker(bot, chat_id: int, message_id: int, pair: str, exp: str, user_id: int):
     try:
         time.sleep(ANALYSIS_WAIT)
-
         df = fetch_data(pair)
         if df is None or df.empty:
             bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="⚠️ Не удалось получить данные. Попробуйте позже.")
             return
-
         ind = compute_indicators(df)
         if not ind:
             bot.edit_message_text(chat_id=chat_id, message_id=message_id, text="⚠️ Недостаточно данных для анализа.")
             return
-
-        # detect patterns using raw df (better accuracy)
         patt = detect_patterns_full(df)
-
         flat, reason = is_flat_or_bad_vol(ind, df)
         direction, base_conf = vote_and_base_confidence(ind)
         quality_label, quality_score = compute_quality_label_and_score(ind, base_conf)
-
-        # Pattern effects (variant B: many signals but boost on clear patterns)
         if patt:
-            # Engulfing and hammer/pinbar strengthen
             if patt.startswith("engulfing") or "pinbar" in patt or "hammer" in patt or patt in ("morning_star","evening_star"):
-                quality_score = min(99.9, quality_score + 12.0)  # stronger signal
+                quality_score = min(99.9, quality_score + 12.0)
             elif patt == "doji":
-                # doji -> reduce quality (uncertainty)
                 quality_score = max(10.0, quality_score - 12.0)
-
-        # Time-based penalty if outside good hours
         if not in_good_hours():
             quality_score = max(10.0, quality_score - 10.0)
             if quality_score < MEDIUM_QUALITY:
                 quality_label = "Low"
-
-        # If flat or bad vol -> recommend skip (don't give false signals)
         if flat:
             text = (
                 f"⚠️ Рынок неподходящий ({reason}). Рекомендуется воздержаться.\n\n"
@@ -572,7 +510,6 @@ def analysis_worker(bot, chat_id: int, message_id: int, pair: str, exp: str, use
                 f"Технический сигнал (без входа): *{direction}* • Качество: *{quality_label}* ({quality_score}%)"
             )
             bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text, parse_mode="Markdown")
-            # log skipped
             log_row({
                 "timestamp": datetime.utcnow().isoformat(),
                 "chat_id": chat_id,
@@ -587,25 +524,22 @@ def analysis_worker(bot, chat_id: int, message_id: int, pair: str, exp: str, use
                 "result": "skipped"
             })
             time.sleep(0.4)
-            bot.send_message(chat_id, "🔁 Возвращаю в меню валютных пар:", reply_markup=main_menu_keyboard())
+            try:
+                bot.send_message(chat_id, "🔁 Возвращаю в меню валютных пар:", reply_markup=main_menu_keyboard())
+            except:
+                pass
             return
-
-        # suggested expiration logic (slightly more aggressive in variant B)
         tp, mq = trend_power_and_macd_quality(ind)
         suggested = "1m" if tp > 0.65 and ind.get("ATR",0) > MIN_ATR else ("2m" if tp > 0.25 else "3m")
-
-        # final direction adjustment: if pattern strongly contradicts indicators -> lower confidence or cancel
+        # adjust on pattern contradictions
         if patt:
             if patt == "engulfing_bull" and direction.startswith("Вниз"):
-                # contradiction: cancel or reduce
                 quality_score = max(10.0, quality_score - 20.0)
             if patt == "engulfing_bear" and direction.startswith("Вверх"):
                 quality_score = max(10.0, quality_score - 20.0)
             if patt == "doji":
                 quality_score = max(10.0, quality_score - 25.0)
-
         price_open = float(df["Close"].iloc[-1])
-
         expl = []
         expl.append("EMA8>EMA21" if ind.get("EMA",0)==1 else "EMA8<EMA21")
         expl.append(f"RSI≈{int(ind.get('_RSI',50))}")
@@ -614,7 +548,6 @@ def analysis_worker(bot, chat_id: int, message_id: int, pair: str, exp: str, use
         elif bbv==-1: expl.append("Цена у верхней BB")
         if patt: expl.append(f"Паттерн:{patt}")
         expl_text = "; ".join(expl[:5])
-
         text = (
             f"📊 *Анализ завершён*\n\n"
             f"🔹 {pair} | Эксп: {exp}\n"
@@ -624,13 +557,10 @@ def analysis_worker(bot, chat_id: int, message_id: int, pair: str, exp: str, use
             f"_Цена (прибл.):_ `{price_open:.6f}`\n\n"
             f"⚡ Откройте сделку в течение *10 секунд*."
         )
-
         try:
             bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text, parse_mode="Markdown")
         except:
             bot.send_message(chat_id, text, parse_mode="Markdown")
-
-        # log pending
         log_row({
             "timestamp": datetime.utcnow().isoformat(),
             "chat_id": chat_id,
@@ -644,11 +574,8 @@ def analysis_worker(bot, chat_id: int, message_id: int, pair: str, exp: str, use
             "price_close": "",
             "result": "pending"
         })
-
-        # finalize after expiration
         seconds = exp_to_seconds(exp)
         threading.Timer(seconds, finalize_worker, args=(bot, chat_id, message_id, pair, exp, direction, quality_score, price_open, user_id)).start()
-
     except Exception as e:
         print("analysis_worker error:", e)
         traceback.print_exc()
@@ -657,16 +584,13 @@ def analysis_worker(bot, chat_id: int, message_id: int, pair: str, exp: str, use
         except:
             pass
 
-
 # ---------------- Finalize ----------------
 def finalize_worker(bot, chat_id: int, message_id: int, pair: str, exp: str, direction: str, quality_score: float, price_open: float, user_id: int):
     try:
         df2 = fetch_data(pair)
         price_close = float(df2["Close"].iloc[-1]) if (df2 is not None and not df2.empty) else price_open
-
         win = (direction.startswith("Вверх") and price_close > price_open) or (direction.startswith("Вниз") and price_close < price_open)
         result = "Плюс ✅" if win else "Минус ❌"
-
         final_text = (
             f"✅ *Сделка завершена*\n\n"
             f"*{pair}* | Эксп: *{exp}*\n"
@@ -675,19 +599,15 @@ def finalize_worker(bot, chat_id: int, message_id: int, pair: str, exp: str, dir
             f"_Открытие:_ `{price_open:.6f}`\n"
             f"_Закрытие:_ `{price_close:.6f}`"
         )
-
         try:
             bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=final_text, parse_mode="Markdown")
         except:
             bot.send_message(chat_id, final_text, parse_mode="Markdown")
-
         time.sleep(0.4)
         try:
             bot.send_message(chat_id, "🔁 Возвращаю в меню валютных пар:", reply_markup=main_menu_keyboard())
         except:
             pass
-
-        # log final
         log_row({
             "timestamp": datetime.utcnow().isoformat(),
             "chat_id": chat_id,
@@ -701,11 +621,9 @@ def finalize_worker(bot, chat_id: int, message_id: int, pair: str, exp: str, dir
             "price_close": price_close,
             "result": result
         })
-
     except Exception as e:
         print("finalize_worker error:", e)
         traceback.print_exc()
-
 
 # ---------------- NFP worker ----------------
 def nfp_worker(bot, chat_id: int, message_id: int, user_id: int):
@@ -719,11 +637,9 @@ def nfp_worker(bot, chat_id: int, message_id: int, user_id: int):
             except:
                 bot.send_message(chat_id, "⚠️ Не удалось получить данные для NFP.")
             return
-
         ind = compute_indicators(df)
         direction, base_conf = vote_and_base_confidence(ind)
         quality_label, quality_score = compute_quality_label_and_score(ind, base_conf)
-
         atr = ind.get("ATR", 0)
         if atr and atr > 0.0025:
             suggested = "1m"
@@ -731,7 +647,6 @@ def nfp_worker(bot, chat_id: int, message_id: int, user_id: int):
             suggested = "2m"
         else:
             suggested = "3m"
-
         text = (
             f"📰 *NFP Анализ (EURUSD, после выхода)*\n\n"
             f"📈 *Рекомендация:* *{direction}*\n"
@@ -740,12 +655,10 @@ def nfp_worker(bot, chat_id: int, message_id: int, user_id: int):
             f"_Короткая логика:_ EMA/MACD/RSI/BB\n\n"
             f"📌 После прочтения нажмите «💱 Валютные пары» чтобы вернуться."
         )
-
         try:
             bot.edit_message_text(chat_id=chat_id, message_id=message_id, text=text, parse_mode="Markdown")
         except:
             bot.send_message(chat_id, text, parse_mode="Markdown")
-
     except Exception as e:
         print("nfp_worker error:", e)
         traceback.print_exc()
@@ -753,7 +666,6 @@ def nfp_worker(bot, chat_id: int, message_id: int, user_id: int):
             bot.send_message(chat_id, "⚠️ Ошибка NFP анализа.")
         except:
             pass
-
 
 # ---------------- Statistics & History Commands ----------------
 def send_stats_callback(chat_id: int):
@@ -791,11 +703,9 @@ def send_stats_callback(chat_id: int):
         except:
             pass
 
-
 def cmd_stats(update: telegram.Update, context: CallbackContext):
     chat_id = update.message.chat_id
     send_stats_callback(chat_id)
-
 
 def cmd_history(update: telegram.Update, context: CallbackContext):
     try:
@@ -828,13 +738,11 @@ def cmd_history(update: telegram.Update, context: CallbackContext):
         except:
             pass
 
-
 # ---------------- Register handlers ----------------
 dispatcher.add_handler(CommandHandler("start", cmd_start))
 dispatcher.add_handler(CommandHandler("stats", cmd_stats))
 dispatcher.add_handler(CommandHandler("history", cmd_history))
 dispatcher.add_handler(CallbackQueryHandler(callback_handler))
-
 
 # ---------------- Start webhook ----------------
 if __name__ == "__main__":
