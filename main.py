@@ -22,7 +22,7 @@ from telegram.ext import Dispatcher, CommandHandler, CallbackQueryHandler, Callb
 
 # ---------------- CONFIG ----------------
 BOT_TOKEN = os.getenv("8316818247:AAFa2M4ZLAHjELys1sr4DXMyZWUa0NHvfKE", "").strip()
-WEBHOOK_URL = os.getenv("https://umartradebot-hcrk.onrender.com/webhook
+WEBHOOK_URL = os.getenv("WEBHOOK_URL", "").strip()
 ", "").strip()
 PORT = int(os.getenv("PORT", "10000"))
 
