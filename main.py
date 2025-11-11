@@ -21,7 +21,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Dispatcher, CommandHandler, CallbackQueryHandler, CallbackContext
 
 # ---------------- CONFIG ----------------
-BOT_TOKEN = os.getenv("8316818247:AAFa2M4ZLAHjELys1sr4DXMyZWUa0NHvfKE", "").strip()
+BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "").strip()
 ", "").strip()
 PORT = int(os.getenv("PORT", "10000"))
