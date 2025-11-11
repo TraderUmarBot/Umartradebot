@@ -21,8 +21,9 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Dispatcher, CommandHandler, CallbackQueryHandler, CallbackContext
 
 # ---------------- CONFIG ----------------
-BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
-WEBHOOK_URL = os.getenv("WEBHOOK_URL", "").strip()
+BOT_TOKEN = os.getenv("8316818247:AAFa2M4ZLAHjELys1sr4DXMyZWUa0NHvfKE", "").strip()
+WEBHOOK_URL = os.getenv("https://umartradebot-hcrk.onrender.com/webhook
+", "").strip()
 PORT = int(os.getenv("PORT", "10000"))
 
 if not BOT_TOKEN:
