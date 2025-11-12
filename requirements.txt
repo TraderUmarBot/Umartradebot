@@ -1,5 +1,11 @@
-python-telegram-bot==13.15
-Flask
-pandas
-numpy
-yfinance
+aiogram==2.25.1
+requests==2.31.0
+flask==3.0.0
+pandas==2.1.1
+numpy==1.26.0
+python-dotenv==1.0.0
+yfinance==0.2.38
+ta==0.11.0
+beautifulsoup4==4.12.2
+aiohttp==3.9.1
+tradingview_ta==3.3.0
