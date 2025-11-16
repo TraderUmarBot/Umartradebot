@@ -1,8 +1,6 @@
-python-telegram-bot==20.3
-aiohttp==3.9.5
+python-telegram-bot==13.15
 requests==2.31.0
-tradingview_ta==3.3.0
-flask==2.3.3
-gunicorn==21.2.0
 pandas==2.2.2
 numpy==1.26.4
+pandas_ta==0.3.2b0
+python-dotenv==1.0.0
