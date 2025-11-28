@@ -3,6 +3,22 @@
 #       SINGLE FILE VERSION
 # ============================
 
+# ============================
+# Патч для Python 3.13, где нет imghdr
+# ============================
+import sys
+import types
+
+if sys.version_info >= (3, 13):
+    # создаём пустой модуль imghdr, чтобы библиотека не падала
+    sys.modules['imghdr'] = types.ModuleType('imghdr')
+    def what(filename, h=None):
+        return None
+    sys.modules['imghdr'].what = what
+
+# =====================================
+#  Обычные импорты
+# =====================================
 import logging
 import time
 import pandas as pd
