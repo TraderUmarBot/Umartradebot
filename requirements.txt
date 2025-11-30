@@ -1,5 +1,5 @@
-python-telegram-bot==13.15
+python-telegram-bot==20.3
 pandas
-pandas_ta
+pandas-ta
 yfinance
 numpy
