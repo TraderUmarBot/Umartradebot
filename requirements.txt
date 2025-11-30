@@ -1,5 +1,5 @@
-python-telegram-bot==20.3
-pandas
-pandas-ta
-yfinance
-numpy
+pandas==2.1.1
+pandas_ta==0.3.15b0
+yfinance==0.2.25
+python-telegram-bot==20.5
+Flask==2.3.6
