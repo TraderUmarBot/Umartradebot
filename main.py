@@ -1,41 +1,46 @@
 import logging
 import pandas as pd
-import pandas_ta as ta
 import yfinance as yf
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import (
-    ApplicationBuilder, CommandHandler, CallbackQueryHandler,
-    ContextTypes
+    Application, ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
 )
 from flask import Flask, request
 import os
 import re
+import asyncio
 
 logging.basicConfig(level=logging.INFO)
 
 # =====================================================
 #                ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ
 # =====================================================
-user_state = {}      # выбранная пара и время
-trade_history = {}   # история сделок
+user_state = {}
+trade_history = {}
 
-# Список всех валютных пар
 ALL_PAIRS = [
     "EUR/USD","GBP/USD","USD/JPY","AUD/USD","USD/CAD","USD/CHF",
     "EUR/JPY","GBP/JPY","AUD/JPY","EUR/GBP","EUR/AUD","GBP/AUD",
     "CAD/JPY","CHF/JPY","EUR/CAD","GBP/CAD","AUD/CAD","AUD/CHF","CAD/CHF"
 ]
+PAIRS_PER_PAGE = 6
 
-PAIRS_PER_PAGE = 6  # сколько пар показывать на одной "странице"
 
-# =====================================================
-#                Вспомогательные функции
-# =====================================================
-def escape_markdown(text: str) -> str:
-    """Экранируем спецсимволы для MarkdownV2"""
-    return re.sub(r'([_*[\]()~`>#+-=|{}.!])', r'\\\1', text)
+# ---------- RSI (без pandas_ta) ----------
+def rsi(series, period=14):
+    delta = series.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.rolling(period).mean()
+    avg_loss = loss.rolling(period).mean()
+    rs = avg_gain / avg_loss
+    return 100 - (100 / (1 + rs))
 
-def get_pairs_page(page: int):
+
+def escape_md(text: str):
+    return re.sub(r"([_*\[\]()~`>#+\-=|{}.!])", r"\\\1", text)
+
+def get_pairs_page(page):
     start = page * PAIRS_PER_PAGE
     end = start + PAIRS_PER_PAGE
     return ALL_PAIRS[start:end]
@@ -43,48 +48,45 @@ def get_pairs_page(page: int):
 def total_pages():
     return (len(ALL_PAIRS) - 1) // PAIRS_PER_PAGE
 
-# =====================================================
-#                 /start команда
-# =====================================================
+
+# =============== /start ================================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("📈 Выбрать валютную пару", callback_data="choose_pair_0")],
         [InlineKeyboardButton("📜 История сделок", callback_data="history")]
     ]
     await update.message.reply_text(
-        "👋 Привет! Я торговый бот.\n\nВыбери действие ниже:",
+        "👋 Привет! Я торговый бот.\n\nВыбери действие:",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
-# =====================================================
-#           Выбор валютной пары с пагинацией
-# =====================================================
-async def choose_pair(update: Update, context: ContextTypes.DEFAULT_TYPE, page=0):
-    query = update.callback_query
-    await query.answer()
+
+# =============== Выбор пары ============================
+async def choose_pair(update, context, page=0):
+    q = update.callback_query
+    await q.answer()
 
     pairs = get_pairs_page(page)
-    keyboard = [[InlineKeyboardButton(pair, callback_data=f"pair_{pair}")] for pair in pairs]
+    keyboard = [[InlineKeyboardButton(p, callback_data=f"pair_{p}")] for p in pairs]
 
-    nav_buttons = []
+    nav = []
     if page > 0:
-        nav_buttons.append(InlineKeyboardButton("⬅ Назад", callback_data=f"choose_pair_{page-1}"))
+        nav.append(InlineKeyboardButton("⬅ Назад", callback_data=f"choose_pair_{page-1}"))
     if page < total_pages():
-        nav_buttons.append(InlineKeyboardButton("Вперёд ➡", callback_data=f"choose_pair_{page+1}"))
-    if nav_buttons:
-        keyboard.append(nav_buttons)
+        nav.append(InlineKeyboardButton("Вперёд ➡", callback_data=f"choose_pair_{page+1}"))
+    if nav:
+        keyboard.append(nav)
 
     keyboard.append([InlineKeyboardButton("⬅ Главное меню", callback_data="back_to_menu")])
 
-    await query.edit_message_text(
+    await q.edit_message_text(
         "⚡ Выберите валютную пару:",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
-# =====================================================
-#          Выбор экспирации после выбора пары
-# =====================================================
-async def choose_expiration(update: Update, context: ContextTypes.DEFAULT_TYPE, pair):
+
+# =============== Экспирация ===============================
+async def choose_expiration(update, context, pair):
     keyboard = [
         [InlineKeyboardButton("1 мин", callback_data=f"exp_1_{pair}")],
         [InlineKeyboardButton("3 мин", callback_data=f"exp_3_{pair}")],
@@ -94,150 +96,151 @@ async def choose_expiration(update: Update, context: ContextTypes.DEFAULT_TYPE, 
     ]
 
     await update.callback_query.edit_message_text(
-        f"Пара: *{escape_markdown(pair)}*\nТеперь выберите экспирацию:",
+        f"Пара: *{escape_md(pair)}*\nВыберите экспирацию:",
         parse_mode="MarkdownV2",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
-# =====================================================
-#                 Генерация сигнала
-# =====================================================
+
+# =============== Сигнал ===============================
 def generate_signal(pair, timeframe):
     try:
         data = yf.download(pair.replace("/", ""), period="1d", interval="1m")
         if data.empty:
             return None
-        data["rsi"] = ta.rsi(data["Close"], length=14)
-        last_rsi = data["rsi"].iloc[-1]
-        if last_rsi < 30:
-            return "⬆ CALL (покупка)"
-        elif last_rsi > 70:
-            return "⬇ PUT (продажа)"
-        else:
-            return "❕ Нет чёткого сигнала"
+        data["rsi"] = rsi(data["Close"])
+        val = data["rsi"].iloc[-1]
+        if val < 30:
+            return "⬆ CALL"
+        elif val > 70:
+            return "⬇ PUT"
+        return "❕ Нет сигнала"
     except:
         return None
 
-# =====================================================
-#            После сигнала → ПЛЮС / МИНУС
-# =====================================================
-async def ask_result(update: Update, context: ContextTypes.DEFAULT_TYPE, pair, expiration):
-    query = update.callback_query
-    user_id = query.from_user.id
 
-    signal = generate_signal(pair, expiration)
+# =============== Ввод результата ======================
+async def ask_result(update, context, pair, exp):
+    q = update.callback_query
+    uid = q.from_user.id
+
+    signal = generate_signal(pair, exp)
     if not signal:
-        await query.edit_message_text("❌ Не удалось получить сигнал.")
+        await q.edit_message_text("❌ Не удалось получить сигнал.")
         return
 
-    user_state[user_id] = {"pair": pair, "exp": expiration}
+    user_state[uid] = {"pair": pair, "exp": exp}
 
-    keyboard = [
-        [
-            InlineKeyboardButton("🟢 Плюс", callback_data="result_plus"),
-            InlineKeyboardButton("🔴 Минус", callback_data="result_minus")
-        ]
-    ]
+    k = [[
+        InlineKeyboardButton("🟢 Плюс", callback_data="result_plus"),
+        InlineKeyboardButton("🔴 Минус", callback_data="result_minus")
+    ]]
 
-    await query.edit_message_text(
-        f"📊 Сигнал для *{escape_markdown(pair)}*\n⏱ Экспирация: *{expiration} мин*\n📈 Сигнал: *{escape_markdown(signal)}*\n\nОтметьте результат:",
+    await q.edit_message_text(
+        f"📊 Сигнал: *{escape_md(signal)}*\n"
+        f"Пара: *{escape_md(pair)}*\n"
+        f"Экспирация: *{exp} мин*",
         parse_mode="MarkdownV2",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        reply_markup=InlineKeyboardMarkup(k)
     )
 
-# =====================================================
-#                 Запись результата
-# =====================================================
-async def save_result(update: Update, context: ContextTypes.DEFAULT_TYPE, result):
-    query = update.callback_query
-    user_id = query.from_user.id
 
-    if user_id not in trade_history:
-        trade_history[user_id] = []
+# =============== Сохранение результата ===================
+async def save_result(update, context, result):
+    q = update.callback_query
+    uid = q.from_user.id
 
-    pair = user_state[user_id]["pair"]
-    exp = user_state[user_id]["exp"]
+    if uid not in trade_history:
+        trade_history[uid] = []
 
-    trade_history[user_id].append(f"{pair} | {exp} мин — {result}")
+    pair = user_state[uid]["pair"]
+    exp = user_state[uid]["exp"]
 
-    keyboard = [
-        [InlineKeyboardButton("📈 Сделать новый сигнал", callback_data="choose_pair_0")],
+    trade_history[uid].append(f"{pair} | {exp} мин — {result}")
+
+    k = [
+        [InlineKeyboardButton("📈 Новый сигнал", callback_data="choose_pair_0")],
         [InlineKeyboardButton("📜 История", callback_data="history")]
     ]
 
-    await query.edit_message_text(
-        f"Записано: *{escape_markdown(result)}*\n\nВыберите действие:",
+    await q.edit_message_text(
+        f"Записано: *{escape_md(result)}*",
         parse_mode="MarkdownV2",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        reply_markup=InlineKeyboardMarkup(k)
     )
 
-# =====================================================
-#                     История
-# =====================================================
-async def history(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    user_id = query.from_user.id
 
-    if user_id not in trade_history or len(trade_history[user_id]) == 0:
-        await query.edit_message_text("📭 История пустая.")
+# =============== История =============================
+async def history(update, context):
+    q = update.callback_query
+    uid = q.from_user.id
+
+    if uid not in trade_history or len(trade_history[uid]) == 0:
+        await q.edit_message_text("📭 История пустая.")
         return
 
-    text = "📜 *Ваша история сделок:*\n\n"
-    for trade in trade_history[user_id]:
-        text += f"• {escape_markdown(trade)}\n"
+    text = "📜 *История:*\n\n"
+    for t in trade_history[uid]:
+        text += f"• {escape_md(t)}\n"
 
-    keyboard = [[InlineKeyboardButton("⬅ Главное меню", callback_data="back_to_menu")]]
+    k = [[InlineKeyboardButton("⬅ Главное меню", callback_data="back_to_menu")]]
 
-    await query.edit_message_text(
+    await q.edit_message_text(
         text,
         parse_mode="MarkdownV2",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+        reply_markup=InlineKeyboardMarkup(k)
     )
 
-# =====================================================
-#                Обработчик Callback
+
 # =====================================================
 async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    data = query.data
+    data = update.callback_query.data
 
     if data.startswith("choose_pair_"):
-        page = int(data.split("_")[2])
-        await choose_pair(update, context, page)
+        await choose_pair(update, context, int(data.split("_")[2]))
     elif data.startswith("pair_"):
-        pair = data.split("_")[1]
-        await choose_expiration(update, context, pair)
+        await choose_expiration(update, context, data.split("_")[1])
     elif data.startswith("exp_"):
         _, exp, pair = data.split("_")
         await ask_result(update, context, pair, int(exp))
     elif data == "result_plus":
-        await save_result(update, context, "🟢 Плюс")
+        await save_result(update, context, "Плюс")
     elif data == "result_minus":
-        await save_result(update, context, "🔴 Минус")
+        await save_result(update, context, "Минус")
     elif data == "history":
         await history(update, context)
     elif data == "back_to_menu":
         await start(update, context)
 
-# =====================================================
-#                        MAIN
-# =====================================================
-TOKEN = os.getenv("BOT_TOKEN")
-WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # ставим URL вашего Render сервиса
+
+# ====================== FLASK + WEBHOOK ======================
+
+BOT_TOKEN = os.getenv("BOT_TOKEN")     # ← ИСПРАВЛЕНО
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 
 app = Flask(__name__)
-application = ApplicationBuilder().token(TOKEN).build()
+
+application = ApplicationBuilder().token(BOT_TOKEN).build()
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CallbackQueryHandler(callbacks))
 
-@app.route(f"/{TOKEN}", methods=["POST"])
-def webhook():
-    """Обрабатываем POST-запрос от Telegram"""
+
+@app.route("/", methods=["GET"])
+def home():
+    return "Bot is running"
+
+
+@app.route(f"/webhook/{BOT_TOKEN}", methods=["POST"])
+async def webhook():
     update = Update.de_json(request.get_json(force=True), application.bot)
-    application.update_queue.put(update)
-    return "OK"
+    await application.process_update(update)
+    return "OK", 200
+
 
 if __name__ == "__main__":
-    application.bot.set_webhook(WEBHOOK_URL + "/" + TOKEN)
-    port = int(os.environ.get("PORT", 10000))
+    asyncio.get_event_loop().run_until_complete(
+        application.bot.set_webhook(f"{WEBHOOK_URL}/webhook/{BOT_TOKEN}")
+    )
+
+    port = int(os.getenv("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
