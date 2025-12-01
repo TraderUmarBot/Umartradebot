@@ -222,7 +222,7 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =====================================================
 #                        MAIN
 # =====================================================
-TOKEN = os.getenv("TELEGRAM_TOKEN")
+TOKEN = os.getenv("BOT_TOKEN")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")  # ставим URL вашего Render сервиса
 
 app = Flask(__name__)
