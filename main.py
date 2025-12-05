@@ -1,4 +1,4 @@
-# main.py — версия с исправленным webhook под Flask/Render
+# main.py — исправленная версия с рабочим Webhook и кнопками Плюс/Минус
 import logging
 import os
 import re
@@ -28,7 +28,7 @@ PAIRS_PER_PAGE = 6
 LOOKBACK = 120
 
 # -----------------------
-# Технические индикаторы
+# Индикаторы
 # -----------------------
 def rsi(series, period=14):
     delta = series.diff()
@@ -68,7 +68,6 @@ def ATR(df, period=14):
     return tr.rolling(period, min_periods=1).mean()
 
 def SuperTrend(df, period=7, multiplier=3):
-    # Возвращаем булевую серию in_uptrend
     hl2 = (df['High'] + df['Low']) / 2
     atr = ATR(df, period)
     upper_basic = hl2 + multiplier * atr
@@ -77,13 +76,10 @@ def SuperTrend(df, period=7, multiplier=3):
     upper = upper_basic.copy()
     lower = lower_basic.copy()
     in_uptrend = pd.Series(index=df.index, data=True)
-
-    # инициализация
     if len(df) > 0:
         in_uptrend.iloc[0] = True
 
     for i in range(1, len(df)):
-        # фиксируем upper / lower похожим способом на классический SuperTrend
         upper.iloc[i] = min(upper_basic.iloc[i], upper.iloc[i-1]) if df['Close'].iloc[i-1] <= upper.iloc[i-1] else upper_basic.iloc[i]
         lower.iloc[i] = max(lower_basic.iloc[i], lower.iloc[i-1]) if df['Close'].iloc[i-1] >= lower.iloc[i-1] else lower_basic.iloc[i]
         if df['Close'].iloc[i] > upper.iloc[i-1]:
@@ -108,7 +104,6 @@ def CCI(df, period=20):
     md = tp.rolling(period, min_periods=1).std(ddof=0).replace(0, 1e-9)
     return (tp - ma) / (0.015 * md)
 
-# свечные паттерны (простая версия)
 def candle_patterns(df):
     patterns = []
     o, c, h, l = df['Open'].iloc[-1], df['Close'].iloc[-1], df['High'].iloc[-1], df['Low'].iloc[-1]
@@ -140,29 +135,23 @@ def total_pages():
     return (len(ALL_PAIRS) - 1) // PAIRS_PER_PAGE
 
 # -----------------------
-# Генерация сигнала
+# Сигнал
 # -----------------------
 def generate_signal(pair, timeframe):
     try:
         ticker = pair.replace("/", "") + "=X"
         df = yf.download(ticker, period="3d", interval="1m", progress=False)
-
-        # если нет данных — пробуем без суффикса =X
         if df.empty or len(df) < 10:
             df = yf.download(pair.replace("/", ""), period="3d", interval="1m", progress=False)
             if df.empty or len(df) < 10:
                 logging.warning(f"No data for {pair}")
                 return "❌ Нет данных для сигнала"
-
         df = df.tail(LOOKBACK).copy()
-
-        # проверим колонки
         for col in ("Open", "High", "Low", "Close"):
             if col not in df.columns:
                 logging.warning(f"Missing column {col} for {pair}")
                 return "❌ Некорректные данные"
 
-        # индикаторы
         df["rsi"] = rsi(df["Close"])
         df["sma50"] = SMA(df["Close"], 50)
         df["sma200"] = SMA(df["Close"], 200)
@@ -200,7 +189,6 @@ def generate_signal(pair, timeframe):
         if pd.notna(last.get("bb_width")) and pd.notna(last.get("atr")):
             if last["bb_width"] < last["atr"]: notes.append("Low volatility — слабый сигнал ⚠️")
 
-        # supertrend — булева серия
         try:
             if bool(df["supertrend"].iloc[-1]):
                 buy_signals += 1; notes.append("SuperTrend Bull ⬆")
@@ -246,8 +234,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("📈 Выбрать валютную пару", callback_data="choose_pair_0")],
         [InlineKeyboardButton("📜 История сделок", callback_data="history")]
     ]
-    await update.message.reply_text("👋 Привет! Я торговый бот.\n\nВыбери действие:",
-                                    reply_markup=InlineKeyboardMarkup(keyboard))
+    if update.message:
+        await update.message.reply_text("👋 Привет! Я торговый бот.\n\nВыбери действие:",
+                                        reply_markup=InlineKeyboardMarkup(keyboard))
+    elif update.callback_query:
+        await update.callback_query.edit_message_text("👋 Привет! Я торговый бот.\n\nВыбери действие:",
+                                                      reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def choose_pair(update, context, page=0):
     q = update.callback_query
@@ -331,9 +323,7 @@ WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 
 if not BOT_TOKEN:
     logging.error("BOT_TOKEN не указан. Бот не будет работать.")
-    # продолжаем, но PTB создаст ошибку при инициализации — это нормально для разработки
 
-# инициализируем PTB application (если токен пустой — будет Exception при старте)
 application = ApplicationBuilder().token(BOT_TOKEN).build()
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CallbackQueryHandler(callbacks))
@@ -344,10 +334,8 @@ app = Flask(__name__)
 def home():
     return "Bot is running"
 
-# Берём token в URL чтобы не хардкодить в коде путь
 @app.route("/webhook/<token>", methods=["POST"])
 def webhook(token):
-    # проверка токена
     if not BOT_TOKEN or token != BOT_TOKEN:
         logging.warning("Webhook token mismatch or BOT_TOKEN not set")
         abort(403)
@@ -355,8 +343,6 @@ def webhook(token):
     try:
         data = request.get_json(force=True)
         update = Update.de_json(data, application.bot)
-
-        # Создаём новый event loop в потоке Flask и запускаем обработку
         loop = asyncio.new_event_loop()
         try:
             asyncio.set_event_loop(loop)
@@ -367,25 +353,6 @@ def webhook(token):
             except Exception:
                 pass
             loop.close()
-            # снимем event loop
             asyncio.set_event_loop(None)
-
         return "OK", 200
-
-    except Exception:
-        logging.exception("Ошибка в webhook:")
-        return "ERROR", 500
-
-if __name__ == "__main__":
-    # Попытка зарегистрировать webhook автоматически (опционально)
-    if BOT_TOKEN and WEBHOOK_URL:
-        try:
-            url = f"{WEBHOOK_URL.rstrip('/')}/webhook/{BOT_TOKEN}"
-            logging.info(f"Setting webhook to: {url}")
-            # безопасно используем asyncio.run для корневого процесса
-            asyncio.run(application.bot.set_webhook(url))
-            logging.info("Webhook установлен")
-        except Exception:
-            logging.exception("Не удалось установить webhook.")
-    port = int(os.getenv("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+    except
