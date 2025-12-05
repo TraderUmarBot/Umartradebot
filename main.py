@@ -1,19 +1,21 @@
-# main.py — рабочая версия для Render
+# main.py — версия с исправленным webhook под Flask/Render
 import logging
-import pandas as pd
-import yfinance as yf
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
-from flask import Flask, request
 import os
 import re
 import asyncio
 
+import pandas as pd
+import yfinance as yf
+
+from flask import Flask, request, abort
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
+
 logging.basicConfig(level=logging.INFO)
 
-# =====================================================
+# -----------------------
 # Глобальные переменные
-# =====================================================
+# -----------------------
 user_state = {}
 trade_history = {}
 
@@ -25,16 +27,16 @@ ALL_PAIRS = [
 PAIRS_PER_PAGE = 6
 LOOKBACK = 120
 
-# =====================================================
-# Индикаторы
-# =====================================================
+# -----------------------
+# Технические индикаторы
+# -----------------------
 def rsi(series, period=14):
     delta = series.diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(period).mean()
-    avg_loss = loss.rolling(period).mean()
-    rs = avg_gain / avg_loss
+    avg_gain = gain.rolling(period, min_periods=1).mean()
+    avg_loss = loss.rolling(period, min_periods=1).mean()
+    rs = avg_gain / avg_loss.replace(0, 1e-9)
     return 100 - (100 / (1 + rs))
 
 def SMA(series, period=50):
@@ -53,19 +55,20 @@ def MACD(series, fast=12, slow=26, signal=9):
 
 def BollingerBands(series, period=20, mult=2):
     sma = series.rolling(period, min_periods=1).mean()
-    std = series.rolling(period, min_periods=1).std(ddof=0)
-    upper = sma + mult*std
-    lower = sma - mult*std
+    std = series.rolling(period, min_periods=1).std(ddof=0).fillna(0)
+    upper = sma + mult * std
+    lower = sma - mult * std
     return upper, lower
 
 def ATR(df, period=14):
-    high_low = df['High'] - df['Low']
+    high_low = (df['High'] - df['Low']).abs()
     high_close = (df['High'] - df['Close'].shift()).abs()
     low_close = (df['Low'] - df['Close'].shift()).abs()
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     return tr.rolling(period, min_periods=1).mean()
 
 def SuperTrend(df, period=7, multiplier=3):
+    # Возвращаем булевую серию in_uptrend
     hl2 = (df['High'] + df['Low']) / 2
     atr = ATR(df, period)
     upper_basic = hl2 + multiplier * atr
@@ -75,7 +78,12 @@ def SuperTrend(df, period=7, multiplier=3):
     lower = lower_basic.copy()
     in_uptrend = pd.Series(index=df.index, data=True)
 
+    # инициализация
+    if len(df) > 0:
+        in_uptrend.iloc[0] = True
+
     for i in range(1, len(df)):
+        # фиксируем upper / lower похожим способом на классический SuperTrend
         upper.iloc[i] = min(upper_basic.iloc[i], upper.iloc[i-1]) if df['Close'].iloc[i-1] <= upper.iloc[i-1] else upper_basic.iloc[i]
         lower.iloc[i] = max(lower_basic.iloc[i], lower.iloc[i-1]) if df['Close'].iloc[i-1] >= lower.iloc[i-1] else lower_basic.iloc[i]
         if df['Close'].iloc[i] > upper.iloc[i-1]:
@@ -97,11 +105,10 @@ def StochasticOscillator(df, k_period=14, d_period=3):
 def CCI(df, period=20):
     tp = (df['High'] + df['Low'] + df['Close']) / 3
     ma = tp.rolling(period, min_periods=1).mean()
-    md = tp.rolling(period, min_periods=1).std(ddof=0)
-    denom = 0.015 * md
-    denom = denom.replace(0, 1e-9)
-    return (tp - ma) / denom
+    md = tp.rolling(period, min_periods=1).std(ddof=0).replace(0, 1e-9)
+    return (tp - ma) / (0.015 * md)
 
+# свечные паттерны (простая версия)
 def candle_patterns(df):
     patterns = []
     o, c, h, l = df['Open'].iloc[-1], df['Close'].iloc[-1], df['High'].iloc[-1], df['Low'].iloc[-1]
@@ -119,40 +126,43 @@ def candle_patterns(df):
     patterns.append("Bullish Candle" if c > o else "Bearish Candle")
     return patterns
 
-# =====================================================
-# Вспомогательные функции
-# =====================================================
+# -----------------------
+# Вспомогательные
+# -----------------------
 def escape_md(text: str):
     return re.sub(r"([_*\[\]()~`>#+\-=|{}.!])", r"\\\1", str(text))
 
 def get_pairs_page(page):
     start = page * PAIRS_PER_PAGE
-    end = start + PAIRS_PER_PAGE
-    return ALL_PAIRS[start:end]
+    return ALL_PAIRS[start:start + PAIRS_PER_PAGE]
 
 def total_pages():
     return (len(ALL_PAIRS) - 1) // PAIRS_PER_PAGE
 
-# =====================================================
-# Генерация сигнала (более безопасная)
-# =====================================================
+# -----------------------
+# Генерация сигнала
+# -----------------------
 def generate_signal(pair, timeframe):
     try:
         ticker = pair.replace("/", "") + "=X"
         df = yf.download(ticker, period="3d", interval="1m", progress=False)
 
+        # если нет данных — пробуем без суффикса =X
         if df.empty or len(df) < 10:
-            logging.warning(f"No data for {pair}")
-            return "❌ Нет данных для сигнала"
+            df = yf.download(pair.replace("/", ""), period="3d", interval="1m", progress=False)
+            if df.empty or len(df) < 10:
+                logging.warning(f"No data for {pair}")
+                return "❌ Нет данных для сигнала"
 
         df = df.tail(LOOKBACK).copy()
-        required_columns = ["Open", "High", "Low", "Close"]
-        for col in required_columns:
+
+        # проверим колонки
+        for col in ("Open", "High", "Low", "Close"):
             if col not in df.columns:
                 logging.warning(f"Missing column {col} for {pair}")
                 return "❌ Некорректные данные"
 
-        # Индикаторы
+        # индикаторы
         df["rsi"] = rsi(df["Close"])
         df["sma50"] = SMA(df["Close"], 50)
         df["sma200"] = SMA(df["Close"], 200)
@@ -175,7 +185,7 @@ def generate_signal(pair, timeframe):
             if last["rsi"] < 30: buy_signals += 1; notes.append("RSI Oversold ⬆")
             elif last["rsi"] > 70: sell_signals += 1; notes.append("RSI Overbought ⬇")
 
-        if pd.notna(last.get("Close")) and pd.notna(last.get("sma50")) and pd.notna(last.get("sma200")):
+        if pd.notna(last.get("sma50")) and pd.notna(last.get("sma200")) and pd.notna(last.get("Close")):
             if last["Close"] > last["sma50"] > last["sma200"]: buy_signals += 1; notes.append("Uptrend ⬆")
             elif last["Close"] < last["sma50"] < last["sma200"]: sell_signals += 1; notes.append("Downtrend ⬇")
 
@@ -183,13 +193,21 @@ def generate_signal(pair, timeframe):
             if last["macd"] > last["macd_signal"]: buy_signals += 1; notes.append("MACD Bull ⬆")
             elif last["macd"] < last["macd_signal"]: sell_signals += 1; notes.append("MACD Bear ⬇")
 
-        if pd.notna(last.get("Close")) and pd.notna(last.get("bb_lower")) and pd.notna(last.get("bb_upper")):
+        if pd.notna(last.get("bb_upper")) and pd.notna(last.get("bb_lower")) and pd.notna(last.get("Close")):
             if last["Close"] < last["bb_lower"]: buy_signals += 1; notes.append("Price below BB ⬆")
             elif last["Close"] > last["bb_upper"]: sell_signals += 1; notes.append("Price above BB ⬇")
 
-        if pd.notna(last.get("supertrend")):
-            if last["supertrend"]: buy_signals += 1; notes.append("SuperTrend Bull ⬆")
-            else: sell_signals += 1; notes.append("SuperTrend Bear ⬇")
+        if pd.notna(last.get("bb_width")) and pd.notna(last.get("atr")):
+            if last["bb_width"] < last["atr"]: notes.append("Low volatility — слабый сигнал ⚠️")
+
+        # supertrend — булева серия
+        try:
+            if bool(df["supertrend"].iloc[-1]):
+                buy_signals += 1; notes.append("SuperTrend Bull ⬆")
+            else:
+                sell_signals += 1; notes.append("SuperTrend Bear ⬇")
+        except Exception:
+            pass
 
         if pd.notna(last.get("k")):
             if last["k"] < 20: buy_signals += 1; notes.append("Stochastic Oversold ⬆")
@@ -200,14 +218,18 @@ def generate_signal(pair, timeframe):
             elif last["cci"] > 100: sell_signals += 1; notes.append("CCI Overbought ⬇")
 
         for p in candle_patterns(df):
-            if p in ["Hammer", "Bullish Candle"]: buy_signals += 1; notes.append(f"{p} ⬆")
-            elif p in ["Inverted Hammer", "Bearish Candle"]: sell_signals += 1; notes.append(f"{p} ⬇")
+            if p in ("Hammer", "Bullish Candle"): buy_signals += 1; notes.append(f"{p} ⬆")
+            elif p in ("Inverted Hammer", "Bearish Candle"): sell_signals += 1; notes.append(f"{p} ⬇")
             elif p == "Doji": notes.append("Doji ⚖️")
 
         final_signal = "❕ Нет явного сигнала"
         strength = "Low"
-        if buy_signals >= 5: final_signal = "⬆ CALL"; strength = "High" if buy_signals >= 7 else "Medium"
-        elif sell_signals >= 5: final_signal = "⬇ PUT"; strength = "High" if sell_signals >= 7 else "Medium"
+        if buy_signals >= 5:
+            final_signal = "⬆ CALL"
+            strength = "High" if buy_signals >= 7 else "Medium"
+        elif sell_signals >= 5:
+            final_signal = "⬇ PUT"
+            strength = "High" if sell_signals >= 7 else "Medium"
 
         details = " | ".join(notes) if notes else "Нет деталей"
         return f"{final_signal} | Strength: {strength} | {details}"
@@ -216,9 +238,9 @@ def generate_signal(pair, timeframe):
         logging.exception(f"Signal generation failed for {pair}")
         return "❌ Ошибка при генерации сигнала"
 
-# =====================================================
-# Telegram обработчики
-# =====================================================
+# -----------------------
+# Telegram handlers
+# -----------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("📈 Выбрать валютную пару", callback_data="choose_pair_0")],
@@ -301,15 +323,17 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "history": await history(update, context)
     elif data == "back_to_menu": await start(update, context)
 
-# =====================================================
-# Flask + webhook (asyncio-safe)
-# =====================================================
+# -----------------------
+# Flask + webhook
+# -----------------------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 
 if not BOT_TOKEN:
     logging.error("BOT_TOKEN не указан. Бот не будет работать.")
+    # продолжаем, но PTB создаст ошибку при инициализации — это нормально для разработки
 
+# инициализируем PTB application (если токен пустой — будет Exception при старте)
 application = ApplicationBuilder().token(BOT_TOKEN).build()
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CallbackQueryHandler(callbacks))
@@ -320,23 +344,45 @@ app = Flask(__name__)
 def home():
     return "Bot is running"
 
-@app.route(f"/webhook/{BOT_TOKEN}", methods=["POST"])
-def webhook():
+# Берём token в URL чтобы не хардкодить в коде путь
+@app.route("/webhook/<token>", methods=["POST"])
+def webhook(token):
+    # проверка токена
+    if not BOT_TOKEN or token != BOT_TOKEN:
+        logging.warning("Webhook token mismatch or BOT_TOKEN not set")
+        abort(403)
+
     try:
         data = request.get_json(force=True)
         update = Update.de_json(data, application.bot)
-        # asyncio-safe execution
-        asyncio.run(application.process_update(update))
+
+        # Создаём новый event loop в потоке Flask и запускаем обработку
+        loop = asyncio.new_event_loop()
+        try:
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(application.process_update(update))
+        finally:
+            try:
+                loop.run_until_complete(loop.shutdown_asyncgens())
+            except Exception:
+                pass
+            loop.close()
+            # снимем event loop
+            asyncio.set_event_loop(None)
+
         return "OK", 200
+
     except Exception:
         logging.exception("Ошибка в webhook:")
         return "ERROR", 500
 
 if __name__ == "__main__":
+    # Попытка зарегистрировать webhook автоматически (опционально)
     if BOT_TOKEN and WEBHOOK_URL:
         try:
-            url = f"{WEBHOOK_URL}/webhook/{BOT_TOKEN}"
+            url = f"{WEBHOOK_URL.rstrip('/')}/webhook/{BOT_TOKEN}"
             logging.info(f"Setting webhook to: {url}")
+            # безопасно используем asyncio.run для корневого процесса
             asyncio.run(application.bot.set_webhook(url))
             logging.info("Webhook установлен")
         except Exception:
