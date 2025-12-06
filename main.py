@@ -1,5 +1,4 @@
-# main.py — Telegram бот с биржевыми и OTC парами, сигналами и историей
-
+# main.py — Telegram бот для Pocket Option с Multi-TF анализом
 import logging, os, re, asyncio
 import pandas as pd, yfinance as yf
 from flask import Flask, request, abort
@@ -31,7 +30,12 @@ PAIRS_PER_PAGE = 6
 LOOKBACK = 120
 
 EXCHANGE_FRAMES = ["1m","3m","5m","10m"]
-OTC_FRAMES = ["5s","30s","1m","3m","5m"]
+OTC_FRAMES = ["5s","15s","1m","3m","5m"]
+
+TF_HIERARCHY = {
+    "exchange": EXCHANGE_FRAMES,
+    "otc": OTC_FRAMES
+}
 
 # -----------------------
 # Технические индикаторы
@@ -133,58 +137,6 @@ def total_pages(pairs):
     return (len(pairs)-1)//PAIRS_PER_PAGE
 
 # -----------------------
-# Генерация сигнала
-# -----------------------
-def generate_signal(pair, timeframe):
-    try:
-        ticker = pair.replace(" OTC","").replace("/","") + "=X"
-        df = yf.download(ticker, period="3d", interval="1m", progress=False)
-        if df.empty or len(df)<10: return "❌ Нет данных для сигнала"
-        df = df.tail(LOOKBACK).copy()
-        df["rsi"]=rsi(df["Close"])
-        df["sma50"]=SMA(df["Close"],50)
-        df["sma200"]=SMA(df["Close"],200)
-        df["ema20"]=EMA(df["Close"],20)
-        macd, macd_signal = MACD(df["Close"])
-        df["macd"], df["macd_signal"]=macd, macd_signal
-        df["bb_upper"], df["bb_lower"]=BollingerBands(df["Close"])
-        df["atr"]=ATR(df)
-        df["supertrend"]=SuperTrend(df)
-        k,d=StochasticOscillator(df)
-        df["k"], df["d"]=k,d
-        df["cci"]=CCI(df)
-        last=df.iloc[-1]
-        buy_signals=sell_signals=0
-        notes=[]
-        if last["rsi"]<30: buy_signals+=1; notes.append("RSI Oversold ⬆")
-        elif last["rsi"]>70: sell_signals+=1; notes.append("RSI Overbought ⬇")
-        if last["Close"]>last["sma50"]>last["sma200"]: buy_signals+=1; notes.append("Uptrend ⬆")
-        elif last["Close"]<last["sma50"]<last["sma200"]: sell_signals+=1; notes.append("Downtrend ⬇")
-        if last["macd"]>last["macd_signal"]: buy_signals+=1; notes.append("MACD Bull ⬆")
-        elif last["macd"]<last["macd_signal"]: sell_signals+=1; notes.append("MACD Bear ⬇")
-        if last["Close"]<last["bb_lower"]: buy_signals+=1; notes.append("Price below BB ⬆")
-        elif last["Close"]>last["bb_upper"]: sell_signals+=1; notes.append("Price above BB ⬇")
-        if bool(last["supertrend"]): buy_signals+=1; notes.append("SuperTrend Bull ⬆")
-        else: sell_signals+=1; notes.append("SuperTrend Bear ⬇")
-        if last["k"]<20: buy_signals+=1; notes.append("Stochastic Oversold ⬆")
-        elif last["k"]>80: sell_signals+=1; notes.append("Stochastic Overbought ⬇")
-        if last["cci"]<-100: buy_signals+=1; notes.append("CCI Oversold ⬆")
-        elif last["cci"]>100: sell_signals+=1; notes.append("CCI Overbought ⬇")
-        for p in candle_patterns(df):
-            if p in ("Hammer","Bullish Candle"): buy_signals+=1; notes.append(f"{p} ⬆")
-            elif p in ("Inverted Hammer","Bearish Candle"): sell_signals+=1; notes.append(f"{p} ⬇")
-            elif p=="Doji": notes.append("Doji ⚖️")
-        if buy_signals>=5: signal="Вверх"
-        elif sell_signals>=5: signal="Вниз"
-        else: signal="Нет сигнала"
-        percent=min(90,50+max(buy_signals,sell_signals)*5)
-        strength="High" if max(buy_signals,sell_signals)>=7 else "Medium" if max(buy_signals,sell_signals)>=5 else "Low"
-        return f"{signal} | Strength: {strength} | Accuracy: {percent}% | Notes: {' | '.join(notes)}"
-    except Exception:
-        logging.exception(f"Ошибка генерации сигнала для {pair}")
-        return "❌ Ошибка генерации сигнала"
-
-# -----------------------
 # Telegram Handlers
 # -----------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -208,38 +160,120 @@ async def choose_pair(update: Update, context: ContextTypes.DEFAULT_TYPE, market
     keyboard.append([InlineKeyboardButton("⬅ Главное меню",callback_data="back_to_menu")])
     await q.edit_message_text("⚡ Выберите валютную пару:",reply_markup=InlineKeyboardMarkup(keyboard))
 
-async def choose_frame(update: Update, context: ContextTypes.DEFAULT_TYPE, market, pair):
-    q=update.callback_query
-    frames=EXCHANGE_FRAMES if market=="exchange" else OTC_FRAMES
-    keyboard=[[InlineKeyboardButton(f,callback_data=f"frame_{market}_{pair}_{f}")] for f in frames]
-    keyboard.append([InlineKeyboardButton("⬅ Назад",callback_data=f"choose_{market}_0")])
-    await q.edit_message_text(f"Пара: *{escape_md(pair)}*\nВыберите таймфрейм:",parse_mode="MarkdownV2",reply_markup=InlineKeyboardMarkup(keyboard))
+# -----------------------
+# Multi-TF анализ и сигнал
+# -----------------------
+async def show_signal(update: Update, context: ContextTypes.DEFAULT_TYPE, market, pair):
+    q = update.callback_query
+    uid = q.from_user.id
 
-async def show_signal(update: Update, context: ContextTypes.DEFAULT_TYPE, market, pair, frame):
-    q=update.callback_query
-    uid=q.from_user.id
-    signal=generate_signal(pair,frame)
-    user_state[uid]={"pair":pair,"frame":frame}
-    keyboard=[[InlineKeyboardButton("🟢 Плюс",callback_data="result_plus"),
-               InlineKeyboardButton("🔴 Минус",callback_data="result_minus")]]
-    await q.edit_message_text(f"📊 Сигнал: *{escape_md(signal)}*\nПара: *{escape_md(pair)}*\nТаймфрейм: *{frame}*",parse_mode="MarkdownV2",reply_markup=InlineKeyboardMarkup(keyboard))
+    tfs = TF_HIERARCHY.get(market, ["1m","3m","5m"])
+    msg_text = f"⏳ Подождите, делаю Multi-TF анализ {pair}...\n"
+    msg_text += "\n".join([f"{tf}: ░░░░░░░░░░ 0%" for tf in tfs])
+    msg = await q.edit_message_text(msg_text)
 
+    notes_total = []
+    buy_total = 0
+    sell_total = 0
+
+    for idx, tf in enumerate(tfs):
+        for i in range(1, 11):
+            await asyncio.sleep(0.3)  # имитация работы
+            bar = "█"*i + "░"*(10-i)
+            new_text = ""
+            for j, tf_inner in enumerate(tfs):
+                if j == idx:
+                    new_text += f"{tf_inner}: {bar} {i*10}%\n"
+                else:
+                    new_text += f"{tf_inner}: {'█'*10 if i>1 else '░'*10} 100%\n"
+            await msg.edit_text(f"⏳ Подождите, делаю Multi-TF анализ {pair}...\n{new_text}")
+
+        ticker = pair.replace(" OTC","").replace("/","") + "=X"
+        df = yf.download(ticker, period="5d", interval=tf, progress=False)
+        if df.empty or len(df)<10:
+            notes_total.append(f"{tf}: нет данных")
+            continue
+        df = df.tail(LOOKBACK).copy()
+
+        df["rsi"]=rsi(df["Close"])
+        df["sma50"]=SMA(df["Close"],50)
+        df["sma200"]=SMA(df["Close"],200)
+        df["ema20"]=EMA(df["Close"],20)
+        macd, macd_signal = MACD(df["Close"])
+        df["macd"], df["macd_signal"]=macd, macd_signal
+        df["bb_upper"], df["bb_lower"]=BollingerBands(df["Close"])
+        df["atr"]=ATR(df)
+        df["supertrend"]=SuperTrend(df)
+        k,d=StochasticOscillator(df)
+        df["k"], df["d"]=k,d
+        df["cci"]=CCI(df)
+        last=df.iloc[-1]
+
+        buy_signals=sell_signals=0
+        notes=[]
+        if last["rsi"]<30: buy_signals+=1; notes.append("RSI Oversold ⬆")
+        elif last["rsi"]>70: sell_signals+=1; notes.append("RSI Overbought ⬇")
+        if last["Close"]>last["sma50"]>last["sma200"]: buy_signals+=1; notes.append("Uptrend ⬆")
+        elif last["Close"]<last["sma50"]<last["sma200"]: sell_signals+=1; notes.append("Downtrend ⬇")
+        if last["macd"]>last["macd_signal"]: buy_signals+=1; notes.append("MACD Bull ⬆")
+        elif last["macd"]<last["macd_signal"]: sell_signals+=1; notes.append("MACD Bear ⬇")
+        if last["Close"]<last["bb_lower"]: buy_signals+=1; notes.append("Price below BB ⬆")
+        elif last["Close"]>last["bb_upper"]: sell_signals+=1; notes.append("Price above BB ⬇")
+        if bool(last["supertrend"]): buy_signals+=1; notes.append("SuperTrend Bull ⬆")
+        else: sell_signals+=1; notes.append("SuperTrend Bear ⬇")
+        if last["k"]<20: buy_signals+=1; notes.append("Stochastic Oversold ⬆")
+        elif last["k"]>80: sell_signals+=1; notes.append("Stochastic Overbought ⬇")
+        if last["cci"]<-100: buy_signals+=1; notes.append("CCI Oversold ⬆")
+        elif last["cci"]>100: sell_signals+=1; notes.append("CCI Overbought ⬇")
+        for p in candle_patterns(df):
+            if p in ("Hammer","Bullish Candle"): buy_signals+=1; notes.append(f"{p} ⬆")
+            elif p in ("Inverted Hammer","Bearish Candle"): sell_signals+=1; notes.append(f"{p} ⬇")
+            elif p=="Doji": notes.append("Doji ⚖️")
+
+        buy_total += buy_signals
+        sell_total += sell_signals
+        notes_total += notes
+
+    # Финальный сигнал
+    if buy_total>=sell_total and buy_total>=5: signal="Вверх"
+    elif sell_total>buy_total and sell_total>=5: signal="Вниз"
+    else: signal="Нет сигнала"
+    strength="High" if max(buy_total,sell_total)>=7 else "Medium" if max(buy_total,sell_total)>=5 else "Low"
+    percent=min(90,50+max(buy_total,sell_total)*5)
+
+    user_state[uid] = {"pair": pair, "market": market}
+
+    keyboard = [[
+        InlineKeyboardButton("🟢 Плюс", callback_data="result_plus"),
+        InlineKeyboardButton("🔴 Минус", callback_data="result_minus")
+    ]]
+    await msg.edit_text(
+        f"📊 Сигнал: *{escape_md(signal)}*\nПара: *{escape_md(pair)}*\nStrength: {strength} | Accuracy: {percent}%\nNotes: {' | '.join(notes_total)}",
+        parse_mode="MarkdownV2",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+
+# -----------------------
+# Сохранение результата
+# -----------------------
 async def save_result(update: Update, context: ContextTypes.DEFAULT_TYPE, result):
-    q=update.callback_query
-    uid=q.from_user.id
-    if uid not in trade_history: trade_history[uid]=[]
-    pair=user_state.get(uid,{}).get("pair","—")
-    frame=user_state.get(uid,{}).get("frame","—")
-    trade_history[uid].append(f"{pair} | {frame} — {result}")
+    q = update.callback_query
+    uid = q.from_user.id
+    if uid not in trade_history: trade_history[uid] = []
+    pair = user_state.get(uid, {}).get("pair","—")
+    trade_history[uid].append(f"{pair} — {result}")
     keyboard=[
         [InlineKeyboardButton("📈 Новый сигнал",callback_data="market_exchange")],
         [InlineKeyboardButton("📜 История",callback_data="history")]
     ]
-    await q.edit_message_text(f"✅ Записано: *{escape_md(result)}*",parse_mode="MarkdownV2",reply_markup=InlineKeyboardMarkup(keyboard))
+    await q.edit_message_text(f"✅ Записано: *{escape_md(result)}*", parse_mode="MarkdownV2", reply_markup=InlineKeyboardMarkup(keyboard))
 
+# -----------------------
+# История
+# -----------------------
 async def show_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q=update.callback_query
-    uid=q.from_user.id
+    q = update.callback_query
+    uid = q.from_user.id
     if uid not in trade_history or len(trade_history[uid])==0:
         await q.edit_message_text("📭 История пустая.")
         return
@@ -247,6 +281,9 @@ async def show_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard=[[InlineKeyboardButton("⬅ Главное меню",callback_data="back_to_menu")]]
     await q.edit_message_text(text,parse_mode="MarkdownV2",reply_markup=InlineKeyboardMarkup(keyboard))
 
+# -----------------------
+# Обработка callback
+# -----------------------
 async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data=update.callback_query.data
     if data=="market_exchange": await choose_pair(update,context,"exchange",0)
@@ -256,17 +293,14 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await choose_pair(update,context,market,int(page))
     elif data.startswith("pair_"):
         _,market,pair=data.split("_",2)
-        await choose_frame(update,context,market,pair)
-    elif data.startswith("frame_"):
-        _,market,pair,frame=data.split("_",3)
-        await show_signal(update,context,market,pair,frame)
+        await show_signal(update,context,market,pair)
     elif data=="result_plus": await save_result(update,context,"Плюс")
     elif data=="result_minus": await save_result(update,context,"Минус")
     elif data=="history": await show_history(update,context)
     elif data=="back_to_menu": await start(update,context)
 
 # -----------------------
-# Flask + Webhook (исправлено)
+# Flask + Webhook
 # -----------------------
 BOT_TOKEN=os.getenv("BOT_TOKEN")
 WEBHOOK_URL=os.getenv("WEBHOOK_URL")
@@ -283,31 +317,18 @@ def home(): return "Bot is running"
 @app.route("/webhook/<token>",methods=["POST"])
 def webhook(token):
     if token!=BOT_TOKEN: abort(403)
-    data=request.get_json(force=True)
-    update=Update.de_json(data,application.bot)
     try:
-        # запускаем асинхронную обработку прямо
+        data=request.get_json(force=True)
+        update=Update.de_json(data,application.bot)
         asyncio.run(application.process_update(update))
-    except Exception as e:
-        logging.exception(f"Ошибка при обработке апдейта: {e}")
+        return "OK",200
+    except Exception:
+        logging.exception("Ошибка в webhook:")
         return "ERROR",500
-    return "OK",200
 
-# -----------------------
-# Инициализация приложения и установка вебхука
-# -----------------------
-async def init_bot():
-    await application.initialize()
+if __name__=="__main__":
     if BOT_TOKEN and WEBHOOK_URL:
         url=f"{WEBHOOK_URL.rstrip('/')}/webhook/{BOT_TOKEN}"
-        await application.bot.set_webhook(url)
+        asyncio.run(application.bot.set_webhook(url))
         logging.info(f"Webhook установлен: {url}")
-
-asyncio.run(init_bot())
-
-# -----------------------
-# Запуск Flask
-# -----------------------
-if __name__=="__main__":
-    port=int(os.getenv("PORT",10000))
-    app.run(host="0.0.0.0",port=port)
+    app.run(host="0.0.0.0",port=int(os.getenv("PORT",10000)))
