@@ -44,14 +44,14 @@ TF_HIERARCHY = {
 }
 
 # -----------------------
-# Стратегии (50 штук)
+# Стратегии
 # -----------------------
 STRATEGIES = [
-    {"name": f"Стратегия {i+1}", 
-     "description": f"Описание стратегии {i+1}: Индикаторы настроены оптимально, вход при условии X, стоп-лосс Y, тейк-профит Z."}
-    for i in range(50)
+    {
+        "name": f"Стратегия {i+1}",
+        "description": f"Описание стратегии {i+1}: Индикаторы настроены оптимально, вход при условии X, стоп-лосс Y, тейк-профит Z."
+    } for i in range(50)
 ]
-
 STRATEGIES_PER_PAGE = 6
 
 def get_strategy_page(page):
@@ -80,10 +80,8 @@ async def show_strategies(update: Update, context: ContextTypes.DEFAULT_TYPE, pa
 async def show_strategy_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, page, idx):
     q = update.callback_query
     strategy = get_strategy_page(page)[idx]
-    keyboard = [
-        [InlineKeyboardButton("⬅ Назад к стратегиям", callback_data=f"strategies_{page}")],
-        [InlineKeyboardButton("⬅ Главное меню", callback_data="back_to_menu")]
-    ]
+    keyboard = [[InlineKeyboardButton("⬅ Назад к стратегиям", callback_data=f"strategies_{page}")],
+                [InlineKeyboardButton("⬅ Главное меню", callback_data="back_to_menu")]]
     await q.edit_message_text(
         f"📌 {strategy['name']}\n\n{strategy['description']}",
         reply_markup=InlineKeyboardMarkup(keyboard)
@@ -331,37 +329,38 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # -----------------------
 # Flask + Webhook
 # -----------------------
-BOT_TOKEN=os.getenv("BOT_TOKEN")
-WEBHOOK_URL=os.getenv("WEBHOOK_URL")
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 
-application=ApplicationBuilder().token(BOT_TOKEN).build()
-application.add_handler(CommandHandler("start",start))
+application = ApplicationBuilder().token(BOT_TOKEN).build()
+application.add_handler(CommandHandler("start", start))
 application.add_handler(CallbackQueryHandler(callbacks))
 
-app=Flask(__name__)
+app = Flask(__name__)
 
-@app.route("/",methods=["GET"])
-def home(): return "Bot is running"
+@app.route("/", methods=["GET"])
+def home():
+    return "Bot is running"
 
-@app.route("/webhook/<token>",methods=["POST"])
+@app.route("/webhook/<token>", methods=["POST"])
 def webhook(token):
-    if token!=BOT_TOKEN: abort(403)
+    if token != BOT_TOKEN: abort(403)
     try:
-        data=request.get_json(force=True)
-        update=Update.de_json(data,application.bot)
-        loop=asyncio.get_event_loop()
+        data = request.get_json(force=True)
+        update = Update.de_json(data, application.bot)
+        loop = asyncio.get_event_loop()
         loop.create_task(application.process_update(update))
-        return "OK",200
+        return "OK", 200
     except Exception:
         logging.exception("Ошибка в webhook:")
-        return "ERROR",500
+        return "ERROR", 500
 
 async def _set_webhook():
-    url=f"{WEBHOOK_URL.rstrip('/')}/webhook/{BOT_TOKEN}"
+    url = f"{WEBHOOK_URL.rstrip('/')}/webhook/{BOT_TOKEN}"
     await application.bot.set_webhook(url)
     logging.info(f"Webhook установлен: {url}")
 
-if __name__=="__main__":
-    loop=asyncio.get_event_loop()
+if __name__ == "__main__":
+    loop = asyncio.get_event_loop()
     loop.run_until_complete(_set_webhook())
-    app.run(host="0.0.0.0",port=int(os.getenv("PORT",10000)))
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
