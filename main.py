@@ -1,9 +1,8 @@
-# main.py — исправленная версия с рабочим Webhook и кнопками Плюс/Минус
+# main.py — бот с биржевыми и OTC парами, Flask webhook
 import logging
 import os
 import re
 import asyncio
-
 import pandas as pd
 import yfinance as yf
 
@@ -19,16 +18,24 @@ logging.basicConfig(level=logging.INFO)
 user_state = {}
 trade_history = {}
 
-ALL_PAIRS = [
+EXCHANGE_PAIRS = [
     "EUR/USD","GBP/USD","USD/JPY","AUD/USD","USD/CAD","USD/CHF",
     "EUR/JPY","GBP/JPY","AUD/JPY","EUR/GBP","EUR/AUD","GBP/AUD",
     "CAD/JPY","CHF/JPY","EUR/CAD","GBP/CAD","AUD/CAD","AUD/CHF","CAD/CHF"
 ]
+
+OTC_PAIRS = [
+    "AUD/CAD OTC","CAD/CHF OTC","CHF/JPY OTC","EUR/GBP OTC","EUR/JPY OTC",
+    "GBP/USD OTC","NZD/JPY OTC","NZD/USD OTC","USD/CAD OTC","EUR/RUB OTC",
+    "USD/PKR OTC","USD/COP OTC","AUD/USD OTC","EUR/CHF OTC","GBP/JPY OTC",
+    "GBP/AUD OTC","USD/JPY OTC","USD/CHF OTC","AUD/JPY OTC","NZD/CAD OTC"
+]
+
 PAIRS_PER_PAGE = 6
 LOOKBACK = 120
 
 # -----------------------
-# Индикаторы
+# Технические индикаторы
 # -----------------------
 def rsi(series, period=14):
     delta = series.diff()
@@ -72,22 +79,16 @@ def SuperTrend(df, period=7, multiplier=3):
     atr = ATR(df, period)
     upper_basic = hl2 + multiplier * atr
     lower_basic = hl2 - multiplier * atr
-
     upper = upper_basic.copy()
     lower = lower_basic.copy()
     in_uptrend = pd.Series(index=df.index, data=True)
-    if len(df) > 0:
-        in_uptrend.iloc[0] = True
-
+    if len(df) > 0: in_uptrend.iloc[0] = True
     for i in range(1, len(df)):
         upper.iloc[i] = min(upper_basic.iloc[i], upper.iloc[i-1]) if df['Close'].iloc[i-1] <= upper.iloc[i-1] else upper_basic.iloc[i]
         lower.iloc[i] = max(lower_basic.iloc[i], lower.iloc[i-1]) if df['Close'].iloc[i-1] >= lower.iloc[i-1] else lower_basic.iloc[i]
-        if df['Close'].iloc[i] > upper.iloc[i-1]:
-            in_uptrend.iloc[i] = True
-        elif df['Close'].iloc[i] < lower.iloc[i-1]:
-            in_uptrend.iloc[i] = False
-        else:
-            in_uptrend.iloc[i] = in_uptrend.iloc[i-1]
+        if df['Close'].iloc[i] > upper.iloc[i-1]: in_uptrend.iloc[i] = True
+        elif df['Close'].iloc[i] < lower.iloc[i-1]: in_uptrend.iloc[i] = False
+        else: in_uptrend.iloc[i] = in_uptrend.iloc[i-1]
     return in_uptrend
 
 def StochasticOscillator(df, k_period=14, d_period=3):
@@ -111,13 +112,9 @@ def candle_patterns(df):
     candle_range = max(h - l, 1e-9)
     upper_shadow = h - max(c, o)
     lower_shadow = min(c, o) - l
-
-    if body / candle_range < 0.25:
-        patterns.append("Doji")
-    if lower_shadow > 2 * body and body > 0:
-        patterns.append("Hammer")
-    if upper_shadow > 2 * body and body > 0:
-        patterns.append("Inverted Hammer")
+    if body / candle_range < 0.25: patterns.append("Doji")
+    if lower_shadow > 2 * body and body > 0: patterns.append("Hammer")
+    if upper_shadow > 2 * body and body > 0: patterns.append("Inverted Hammer")
     patterns.append("Bullish Candle" if c > o else "Bearish Candle")
     return patterns
 
@@ -127,128 +124,125 @@ def candle_patterns(df):
 def escape_md(text: str):
     return re.sub(r"([_*\[\]()~`>#+\-=|{}.!])", r"\\\1", str(text))
 
-def get_pairs_page(page):
-    start = page * PAIRS_PER_PAGE
-    return ALL_PAIRS[start:start + PAIRS_PER_PAGE]
-
-def total_pages():
-    return (len(ALL_PAIRS) - 1) // PAIRS_PER_PAGE
+def total_pages(pairs_list):
+    return (len(pairs_list) - 1) // PAIRS_PER_PAGE
 
 # -----------------------
-# Сигнал
+# Генерация сигнала
 # -----------------------
 def generate_signal(pair, timeframe):
     try:
-        ticker = pair.replace("/", "") + "=X"
+        ticker = pair.replace("/", "").replace(" OTC", "") + "=X"
         df = yf.download(ticker, period="3d", interval="1m", progress=False)
         if df.empty or len(df) < 10:
-            df = yf.download(pair.replace("/", ""), period="3d", interval="1m", progress=False)
+            df = yf.download(pair.replace("/", "").replace(" OTC", ""), period="3d", interval="1m", progress=False)
             if df.empty or len(df) < 10:
-                logging.warning(f"No data for {pair}")
                 return "❌ Нет данных для сигнала"
-        df = df.tail(LOOKBACK).copy()
-        for col in ("Open", "High", "Low", "Close"):
-            if col not in df.columns:
-                logging.warning(f"Missing column {col} for {pair}")
-                return "❌ Некорректные данные"
 
+        df = df.tail(LOOKBACK).copy()
+        for col in ("Open","High","Low","Close"):
+            if col not in df.columns: return "❌ Некорректные данные"
+
+        # Индикаторы
         df["rsi"] = rsi(df["Close"])
-        df["sma50"] = SMA(df["Close"], 50)
-        df["sma200"] = SMA(df["Close"], 200)
-        df["ema20"] = EMA(df["Close"], 20)
-        macd, macd_signal, _ = MACD(df["Close"])
+        df["sma50"] = SMA(df["Close"],50)
+        df["sma200"] = SMA(df["Close"],200)
+        df["ema20"] = EMA(df["Close"],20)
+        macd, macd_signal,_ = MACD(df["Close"])
         df["macd"], df["macd_signal"] = macd, macd_signal
         df["bb_upper"], df["bb_lower"] = BollingerBands(df["Close"])
         df["bb_width"] = df["bb_upper"] - df["bb_lower"]
         df["atr"] = ATR(df)
         df["supertrend"] = SuperTrend(df)
-        k, d = StochasticOscillator(df)
-        df["k"], df["d"] = k, d
+        k,d = StochasticOscillator(df)
+        df["k"], df["d"] = k,d
         df["cci"] = CCI(df)
 
         last = df.iloc[-1]
-        buy_signals = sell_signals = 0
+        buy = sell = 0
         notes = []
 
+        # RSI
         if pd.notna(last.get("rsi")):
-            if last["rsi"] < 30: buy_signals += 1; notes.append("RSI Oversold ⬆")
-            elif last["rsi"] > 70: sell_signals += 1; notes.append("RSI Overbought ⬇")
-
+            if last["rsi"] < 30: buy+=1; notes.append("RSI Oversold ⬆")
+            elif last["rsi"] > 70: sell+=1; notes.append("RSI Overbought ⬇")
+        # Trend
         if pd.notna(last.get("sma50")) and pd.notna(last.get("sma200")) and pd.notna(last.get("Close")):
-            if last["Close"] > last["sma50"] > last["sma200"]: buy_signals += 1; notes.append("Uptrend ⬆")
-            elif last["Close"] < last["sma50"] < last["sma200"]: sell_signals += 1; notes.append("Downtrend ⬇")
-
+            if last["Close"] > last["sma50"] > last["sma200"]: buy+=1; notes.append("Uptrend ⬆")
+            elif last["Close"] < last["sma50"] < last["sma200"]: sell+=1; notes.append("Downtrend ⬇")
+        # MACD
         if pd.notna(last.get("macd")) and pd.notna(last.get("macd_signal")):
-            if last["macd"] > last["macd_signal"]: buy_signals += 1; notes.append("MACD Bull ⬆")
-            elif last["macd"] < last["macd_signal"]: sell_signals += 1; notes.append("MACD Bear ⬇")
-
+            if last["macd"] > last["macd_signal"]: buy+=1; notes.append("MACD Bull ⬆")
+            elif last["macd"] < last["macd_signal"]: sell+=1; notes.append("MACD Bear ⬇")
+        # Bollinger
         if pd.notna(last.get("bb_upper")) and pd.notna(last.get("bb_lower")) and pd.notna(last.get("Close")):
-            if last["Close"] < last["bb_lower"]: buy_signals += 1; notes.append("Price below BB ⬆")
-            elif last["Close"] > last["bb_upper"]: sell_signals += 1; notes.append("Price above BB ⬇")
-
+            if last["Close"] < last["bb_lower"]: buy+=1; notes.append("Price below BB ⬆")
+            elif last["Close"] > last["bb_upper"]: sell+=1; notes.append("Price above BB ⬇")
+        # Volatility
         if pd.notna(last.get("bb_width")) and pd.notna(last.get("atr")):
-            if last["bb_width"] < last["atr"]: notes.append("Low volatility — слабый сигнал ⚠️")
-
+            if last["bb_width"] < last["atr"]: notes.append("Low volatility ⚠️")
+        # SuperTrend
         try:
-            if bool(df["supertrend"].iloc[-1]):
-                buy_signals += 1; notes.append("SuperTrend Bull ⬆")
-            else:
-                sell_signals += 1; notes.append("SuperTrend Bear ⬇")
-        except Exception:
-            pass
-
+            if bool(df["supertrend"].iloc[-1]): buy+=1; notes.append("SuperTrend Bull ⬆")
+            else: sell+=1; notes.append("SuperTrend Bear ⬇")
+        except: pass
+        # Stochastic
         if pd.notna(last.get("k")):
-            if last["k"] < 20: buy_signals += 1; notes.append("Stochastic Oversold ⬆")
-            elif last["k"] > 80: sell_signals += 1; notes.append("Stochastic Overbought ⬇")
-
+            if last["k"] < 20: buy+=1; notes.append("Stochastic Oversold ⬆")
+            elif last["k"] > 80: sell+=1; notes.append("Stochastic Overbought ⬇")
+        # CCI
         if pd.notna(last.get("cci")):
-            if last["cci"] < -100: buy_signals += 1; notes.append("CCI Oversold ⬆")
-            elif last["cci"] > 100: sell_signals += 1; notes.append("CCI Overbought ⬇")
-
+            if last["cci"] < -100: buy+=1; notes.append("CCI Oversold ⬆")
+            elif last["cci"] > 100: sell+=1; notes.append("CCI Overbought ⬇")
+        # Candles
         for p in candle_patterns(df):
-            if p in ("Hammer", "Bullish Candle"): buy_signals += 1; notes.append(f"{p} ⬆")
-            elif p in ("Inverted Hammer", "Bearish Candle"): sell_signals += 1; notes.append(f"{p} ⬇")
-            elif p == "Doji": notes.append("Doji ⚖️")
+            if p in ("Hammer","Bullish Candle"): buy+=1; notes.append(f"{p} ⬆")
+            elif p in ("Inverted Hammer","Bearish Candle"): sell+=1; notes.append(f"{p} ⬇")
+            elif p=="Doji": notes.append("Doji ⚖️")
 
-        final_signal = "❕ Нет явного сигнала"
-        strength = "Low"
-        if buy_signals >= 5:
-            final_signal = "⬆ CALL"
-            strength = "High" if buy_signals >= 7 else "Medium"
-        elif sell_signals >= 5:
-            final_signal = "⬇ PUT"
-            strength = "High" if sell_signals >= 7 else "Medium"
+        final="❕ Нет явного сигнала"
+        strength="Low"
+        if buy>=5: final="⬆ CALL"; strength="High" if buy>=7 else "Medium"
+        elif sell>=5: final="⬇ PUT"; strength="High" if sell>=7 else "Medium"
 
         details = " | ".join(notes) if notes else "Нет деталей"
-        return f"{final_signal} | Strength: {strength} | {details}"
-
-    except Exception:
-        logging.exception(f"Signal generation failed for {pair}")
+        return f"{final} | Strength: {strength} | {details}"
+    except Exception as e:
+        logging.exception(f"Signal error {pair}")
         return "❌ Ошибка при генерации сигнала"
 
 # -----------------------
-# Telegram handlers
+# Telegram Handlers
 # -----------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
-        [InlineKeyboardButton("📈 Выбрать валютную пару", callback_data="choose_pair_0")],
+        [InlineKeyboardButton("📈 Выбрать валютную пару", callback_data="choose_market")],
         [InlineKeyboardButton("📜 История сделок", callback_data="history")]
     ]
-    if update.message:
-        await update.message.reply_text("👋 Привет! Я торговый бот.\n\nВыбери действие:",
-                                        reply_markup=InlineKeyboardMarkup(keyboard))
-    elif update.callback_query:
-        await update.callback_query.edit_message_text("👋 Привет! Я торговый бот.\n\nВыбери действие:",
-                                                      reply_markup=InlineKeyboardMarkup(keyboard))
+    await update.message.reply_text("👋 Привет! Я торговый бот.\nВыбери действие:",
+                                    reply_markup=InlineKeyboardMarkup(keyboard))
 
-async def choose_pair(update, context, page=0):
+async def choose_market(update, context):
     q = update.callback_query
     await q.answer()
-    pairs = get_pairs_page(page)
+    keyboard = [
+        [InlineKeyboardButton("💹 Биржевые", callback_data="market_exchange")],
+        [InlineKeyboardButton("📊 OTC", callback_data="market_otc")],
+        [InlineKeyboardButton("⬅ Главное меню", callback_data="back_to_menu")]
+    ]
+    await q.edit_message_text("Выберите тип рынка:", reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def choose_pair(update, context, market="exchange", page=0):
+    q = update.callback_query
+    await q.answer()
+    pairs_list = EXCHANGE_PAIRS if market=="exchange" else OTC_PAIRS
+    start = page*PAIRS_PER_PAGE
+    pairs = pairs_list[start:start+PAIRS_PER_PAGE]
+
     keyboard = [[InlineKeyboardButton(p, callback_data=f"pair_{p}")] for p in pairs]
-    nav = []
-    if page > 0: nav.append(InlineKeyboardButton("⬅ Назад", callback_data=f"choose_pair_{page-1}"))
-    if page < total_pages(): nav.append(InlineKeyboardButton("Вперёд ➡", callback_data=f"choose_pair_{page+1}"))
+    nav=[]
+    if page>0: nav.append(InlineKeyboardButton("⬅ Назад", callback_data=f"choose_pair_{market}_{page-1}"))
+    if page<total_pages(pairs_list): nav.append(InlineKeyboardButton("Вперёд ➡", callback_data=f"choose_pair_{market}_{page+1}"))
     if nav: keyboard.append(nav)
     keyboard.append([InlineKeyboardButton("⬅ Главное меню", callback_data="back_to_menu")])
     await q.edit_message_text("⚡ Выберите валютную пару:", reply_markup=InlineKeyboardMarkup(keyboard))
@@ -259,7 +253,7 @@ async def choose_expiration(update, context, pair):
         [InlineKeyboardButton("3 мин", callback_data=f"exp_3_{pair}")],
         [InlineKeyboardButton("5 мин", callback_data=f"exp_5_{pair}")],
         [InlineKeyboardButton("10 мин", callback_data=f"exp_10_{pair}")],
-        [InlineKeyboardButton("⬅ Назад", callback_data="choose_pair_0")]
+        [InlineKeyboardButton("⬅ Назад", callback_data="choose_market")]
     ]
     await update.callback_query.edit_message_text(
         f"Пара: *{escape_md(pair)}*\nВыберите экспирацию:",
@@ -275,20 +269,20 @@ async def ask_result(update, context, pair, exp):
         await q.edit_message_text("❌ Не удалось получить сигнал (нет данных).")
         return
     user_state[uid] = {"pair": pair, "exp": exp}
-    k = [[InlineKeyboardButton("🟢 Плюс", callback_data="result_plus"),
-          InlineKeyboardButton("🔴 Минус", callback_data="result_minus")]]
+    k=[[InlineKeyboardButton("🟢 Плюс", callback_data="result_plus"),
+        InlineKeyboardButton("🔴 Минус", callback_data="result_minus")]]
     await q.edit_message_text(f"📊 Сигнал: *{escape_md(signal)}*\nПара: *{escape_md(pair)}*\nЭкспирация: *{exp} мин*",
                               parse_mode="MarkdownV2", reply_markup=InlineKeyboardMarkup(k))
 
 async def save_result(update, context, result):
     q = update.callback_query
     uid = q.from_user.id
-    if uid not in trade_history: trade_history[uid] = []
-    pair = user_state.get(uid, {}).get("pair", "—")
-    exp = user_state.get(uid, {}).get("exp", "—")
+    if uid not in trade_history: trade_history[uid]=[]
+    pair = user_state.get(uid,{}).get("pair","—")
+    exp = user_state.get(uid,{}).get("exp","—")
     trade_history[uid].append(f"{pair} | {exp} мин — {result}")
     k = [
-        [InlineKeyboardButton("📈 Новый сигнал", callback_data="choose_pair_0")],
+        [InlineKeyboardButton("📈 Новый сигнал", callback_data="choose_market")],
         [InlineKeyboardButton("📜 История", callback_data="history")]
     ]
     await q.edit_message_text(f"Записано: *{escape_md(result)}*", parse_mode="MarkdownV2", reply_markup=InlineKeyboardMarkup(k))
@@ -296,34 +290,42 @@ async def save_result(update, context, result):
 async def history(update, context):
     q = update.callback_query
     uid = q.from_user.id
-    if uid not in trade_history or len(trade_history[uid]) == 0:
+    if uid not in trade_history or len(trade_history[uid])==0:
         await q.edit_message_text("📭 История пустая.")
         return
-    text = "📜 *История:*\n\n" + "\n".join([f"• {escape_md(t)}" for t in trade_history[uid]])
-    k = [[InlineKeyboardButton("⬅ Главное меню", callback_data="back_to_menu")]]
+    text="📜 *История:*\n\n" + "\n".join([f"• {escape_md(t)}" for t in trade_history[uid]])
+    k=[[InlineKeyboardButton("⬅ Главное меню", callback_data="back_to_menu")]]
     await q.edit_message_text(text, parse_mode="MarkdownV2", reply_markup=InlineKeyboardMarkup(k))
 
 async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = update.callback_query.data
-    if data.startswith("choose_pair_"): await choose_pair(update, context, int(data.split("_")[2]))
+    if data=="choose_market": await choose_market(update, context)
+    elif data=="market_exchange": await choose_pair(update, context, "exchange", 0)
+    elif data=="market_otc": await choose_pair(update, context, "otc", 0)
+    elif data.startswith("choose_pair_"):
+        parts = data.split("_")
+        market, page = parts[2], int(parts[3])
+        await choose_pair(update, context, market, page)
     elif data.startswith("pair_"): await choose_expiration(update, context, data.split("_")[1])
     elif data.startswith("exp_"):
         _, exp, pair = data.split("_")
         await ask_result(update, context, pair, int(exp))
-    elif data == "result_plus": await save_result(update, context, "Плюс")
-    elif data == "result_minus": await save_result(update, context, "Минус")
-    elif data == "history": await history(update, context)
-    elif data == "back_to_menu": await start(update, context)
+    elif data=="result_plus": await save_result(update, context, "Плюс")
+    elif data=="result_minus": await save_result(update, context, "Минус")
+    elif data=="history": await history(update, context)
+    elif data=="back_to_menu": await start(update, context)
 
 # -----------------------
 # Flask + webhook
 # -----------------------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
+
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 
 if not BOT_TOKEN:
     logging.error("BOT_TOKEN не указан. Бот не будет работать.")
 
+# инициализация PTB Application
 application = ApplicationBuilder().token(BOT_TOKEN).build()
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CallbackQueryHandler(callbacks))
@@ -339,7 +341,6 @@ def webhook(token):
     if not BOT_TOKEN or token != BOT_TOKEN:
         logging.warning("Webhook token mismatch or BOT_TOKEN not set")
         abort(403)
-
     try:
         data = request.get_json(force=True)
         update = Update.de_json(data, application.bot)
@@ -355,4 +356,18 @@ def webhook(token):
             loop.close()
             asyncio.set_event_loop(None)
         return "OK", 200
-    except
+    except Exception:
+        logging.exception("Ошибка в webhook:")
+        return "ERROR", 500
+
+if __name__ == "__main__":
+    if BOT_TOKEN and WEBHOOK_URL:
+        try:
+            url = f"{WEBHOOK_URL.rstrip('/')}/webhook/{BOT_TOKEN}"
+            logging.info(f"Setting webhook to: {url}")
+            asyncio.run(application.bot.set_webhook(url))
+            logging.info("Webhook установлен")
+        except Exception:
+            logging.exception("Не удалось установить webhook.")
+    port = int(os.getenv("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
