@@ -1,4 +1,5 @@
-# main.py — Полностью рабочий Telegram бот с биржевыми и OTC парами, сигналами и историей
+# main.py — Telegram бот с биржевыми и OTC парами, сигналами и историей
+
 import logging, os, re, asyncio
 import pandas as pd, yfinance as yf
 from flask import Flask, request, abort
@@ -265,7 +266,7 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data=="back_to_menu": await start(update,context)
 
 # -----------------------
-# Flask + Webhook
+# Flask + Webhook (исправленный блок)
 # -----------------------
 BOT_TOKEN=os.getenv("BOT_TOKEN")
 WEBHOOK_URL=os.getenv("WEBHOOK_URL")
@@ -282,22 +283,24 @@ def home(): return "Bot is running"
 @app.route("/webhook/<token>",methods=["POST"])
 def webhook(token):
     if token!=BOT_TOKEN: abort(403)
-    try:
-        data=request.get_json(force=True)
-        update=Update.de_json(data,application.bot)
-        loop=asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(application.process_update(update))
-        loop.close()
-        asyncio.set_event_loop(None)
-        return "OK",200
-    except Exception:
-        logging.exception("Ошибка в webhook:")
-        return "ERROR",500
+    data=request.get_json(force=True)
+    update=Update.de_json(data,application.bot)
+    # Асинхронная обработка без создания нового цикла
+    asyncio.create_task(application.process_update(update))
+    return "OK",200
 
-if __name__=="__main__":
+# -----------------------
+# Инициализация приложения и установка вебхука
+# -----------------------
+async def init_bot():
+    await application.initialize()
     if BOT_TOKEN and WEBHOOK_URL:
         url=f"{WEBHOOK_URL.rstrip('/')}/webhook/{BOT_TOKEN}"
-        asyncio.run(application.bot.set_webhook(url))
+        await application.bot.set_webhook(url)
         logging.info(f"Webhook установлен: {url}")
-    app.run(host="0.0.0.0",port=int(os.getenv("PORT",10000)))
+
+asyncio.run(init_bot())
+
+if __name__=="__main__":
+    port=int(os.getenv("PORT",10000))
+    app.run(host="0.0.0.0",port=port)
