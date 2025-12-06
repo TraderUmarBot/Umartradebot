@@ -1,5 +1,5 @@
-nest_asyncio
-pandas
-yfinance
-python-telegram-bot==20.0
-flask
+Flask==2.3.3
+python-telegram-bot==20.3
+pandas==2.1.1
+yfinance==0.2.27
+nest_asyncio==1.5.8
