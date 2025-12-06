@@ -266,7 +266,7 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data=="back_to_menu": await start(update,context)
 
 # -----------------------
-# Flask + Webhook (исправленный блок)
+# Flask + Webhook (исправлено)
 # -----------------------
 BOT_TOKEN=os.getenv("BOT_TOKEN")
 WEBHOOK_URL=os.getenv("WEBHOOK_URL")
@@ -285,8 +285,12 @@ def webhook(token):
     if token!=BOT_TOKEN: abort(403)
     data=request.get_json(force=True)
     update=Update.de_json(data,application.bot)
-    # Асинхронная обработка без создания нового цикла
-    asyncio.create_task(application.process_update(update))
+    try:
+        # запускаем асинхронную обработку прямо
+        asyncio.run(application.process_update(update))
+    except Exception as e:
+        logging.exception(f"Ошибка при обработке апдейта: {e}")
+        return "ERROR",500
     return "OK",200
 
 # -----------------------
@@ -301,6 +305,9 @@ async def init_bot():
 
 asyncio.run(init_bot())
 
+# -----------------------
+# Запуск Flask
+# -----------------------
 if __name__=="__main__":
     port=int(os.getenv("PORT",10000))
     app.run(host="0.0.0.0",port=port)
