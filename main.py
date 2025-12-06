@@ -44,14 +44,14 @@ TF_HIERARCHY = {
 }
 
 # -----------------------
-# Стратегии
+# Стратегии (50 штук)
 # -----------------------
 STRATEGIES = [
-    {
-        "name": f"Стратегия {i+1}",
-        "description": f"Описание стратегии {i+1}: Индикаторы настроены оптимально, вход при условии X, стоп-лосс Y, тейк-профит Z."
-    } for i in range(50)
+    {"name": f"Стратегия {i+1}", 
+     "description": f"Описание стратегии {i+1}: Индикаторы настроены оптимально, вход при условии X, стоп-лосс Y, тейк-профит Z."}
+    for i in range(50)
 ]
+
 STRATEGIES_PER_PAGE = 6
 
 def get_strategy_page(page):
@@ -80,8 +80,10 @@ async def show_strategies(update: Update, context: ContextTypes.DEFAULT_TYPE, pa
 async def show_strategy_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, page, idx):
     q = update.callback_query
     strategy = get_strategy_page(page)[idx]
-    keyboard = [[InlineKeyboardButton("⬅ Назад к стратегиям", callback_data=f"strategies_{page}")],
-                [InlineKeyboardButton("⬅ Главное меню", callback_data="back_to_menu")]]
+    keyboard = [
+        [InlineKeyboardButton("⬅ Назад к стратегиям", callback_data=f"strategies_{page}")],
+        [InlineKeyboardButton("⬅ Главное меню", callback_data="back_to_menu")]
+    ]
     await q.edit_message_text(
         f"📌 {strategy['name']}\n\n{strategy['description']}",
         reply_markup=InlineKeyboardMarkup(keyboard)
