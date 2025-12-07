@@ -1,5 +1,5 @@
 # =======================
-# main.py — Telegram бот для Pocket Option (анализ рынка)
+# main.py — Telegram бот для Pocket Option (Анализ рынка)
 # =======================
 
 import logging, os, re, asyncio
@@ -134,7 +134,7 @@ def candle_patterns(df):
     return patterns
 
 # -----------------------
-# Вспомогательные
+# Вспомогательные функции
 # -----------------------
 def escape_md(text: str):
     return re.sub(r"([_*\[\]()~`>#+\-=|{}.!])", r"\\\1", str(text))
@@ -225,6 +225,9 @@ async def show_signal(update: Update, context: ContextTypes.DEFAULT_TYPE, market
             buys += 1; notes.append("MACD Bull ⬆")
         else:
             sells += 1; notes.append("MACD Bear ⬇")
+
+        patterns = candle_patterns(df)
+        notes += patterns
 
         buy_total += buys
         sell_total += sells
