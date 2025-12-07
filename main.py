@@ -1,5 +1,5 @@
 # =======================
-# main.py — Telegram бот для Pocket Option с 50 стратегиями (FIXED)
+# main.py — Telegram бот для Pocket Option (без стратегий)
 # =======================
 
 import logging, os, re, asyncio
@@ -42,65 +42,6 @@ TF_HIERARCHY = {
     "exchange": EXCHANGE_FRAMES,
     "otc": OTC_FRAMES
 }
-
-# -----------------------
-# Стратегии
-# -----------------------
-STRATEGIES = [
-    {"name": f"Стратегия {i+1}",
-     "description": f"Описание стратегии {i+1}: Индикаторы настроены оптимально, вход при условии X, стоп-лосс Y, тейк-профит Z."}
-    for i in range(50)
-]
-STRATEGIES_PER_PAGE = 6
-
-def get_strategy_page(page):
-    start = page * STRATEGIES_PER_PAGE
-    return STRATEGIES[start:start + STRATEGIES_PER_PAGE]
-
-def total_strategy_pages():
-    return (len(STRATEGIES) - 1) // STRATEGIES_PER_PAGE
-
-# -----------------------
-# Меню стратегий
-# -----------------------
-async def show_strategies(update: Update, context: ContextTypes.DEFAULT_TYPE, page=0):
-    q = update.callback_query
-    await q.answer()
-    page_strategies = get_strategy_page(page)
-    
-    # Клавиатура стратегий — каждая кнопка на отдельной строке
-    keyboard = [[InlineKeyboardButton(s["name"], callback_data=f"strategy_{page}_{i}")]
-                 ] for i, s in enumerate(page_strategies)]
-    
-    # Навигация по страницам
-    nav = []
-    if page > 0:
-        nav.append(InlineKeyboardButton("⬅ Назад", callback_data=f"strategies_{page-1}"))
-    if page < total_strategy_pages():
-        nav.append(InlineKeyboardButton("Вперёд ➡", callback_data=f"strategies_{page+1}"))
-    if nav:
-        keyboard.append(nav)
-    
-    # Главное меню
-    keyboard.append([InlineKeyboardButton("⬅ Главное меню", callback_data="back_to_menu")])
-    
-    await q.edit_message_text("📘 Выберите стратегию:", reply_markup=InlineKeyboardMarkup(keyboard))
-
-async def show_strategy_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, page, idx):
-    q = update.callback_query
-    try:
-        strategy = get_strategy_page(page)[idx]
-    except Exception:
-        await q.answer("Стратегия не найдена", show_alert=True)
-        return
-    keyboard = [
-        [InlineKeyboardButton("⬅ Назад к стратегиям", callback_data=f"strategies_{page}")],
-        [InlineKeyboardButton("⬅ Главное меню", callback_data="back_to_menu")]
-    ]
-    await q.edit_message_text(
-        f"📌 {strategy['name']}\n\n{strategy['description']}",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
 
 # -----------------------
 # Технические индикаторы
@@ -212,7 +153,6 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("📈 Биржевой рынок", callback_data="market_exchange")],
         [InlineKeyboardButton("📈 OTC рынок", callback_data="market_otc")],
-        [InlineKeyboardButton("📘 Стратегии", callback_data="strategies")],
         [InlineKeyboardButton("📜 История сделок", callback_data="history")]
     ]
 
@@ -365,14 +305,6 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await show_history(update, context)
     elif data == "back_to_menu":
         await show_main_menu(update, context)
-    elif data == "strategies":
-        await show_strategies(update, context, 0)
-    elif data.startswith("strategies_"):
-        _, page = data.split("_")
-        await show_strategies(update, context, int(page))
-    elif data.startswith("strategy_"):
-        _, page, idx = data.split("_")
-        await show_strategy_detail(update, context, int(page), int(idx))
     else:
         await q.answer()
 
@@ -406,3 +338,19 @@ def webhook(token):
         loop = asyncio.get_event_loop()
         loop.create_task(application.process_update(update))
         return "OK", 200
+    except Exception:
+        logging.exception("Ошибка в webhook:")
+        return "ERROR", 500
+
+async def _startup():
+    logging.info("Инициализация приложения Telegram...")
+    await application.initialize()
+    await application.start()
+    url = f"{WEBHOOK_URL.rstrip('/')}/webhook/{BOT_TOKEN}"
+    await application.bot.set_webhook(url)
+    logging.info(f"Webhook установлен: {url}")
+
+if __name__ == "__main__":
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(_startup())
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
