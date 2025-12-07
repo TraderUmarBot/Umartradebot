@@ -1,5 +1,5 @@
 # =======================
-# main.py — Telegram бот для Pocket Option (без стратегий)
+# main.py — Telegram бот для Pocket Option (анализ рынка)
 # =======================
 
 import logging, os, re, asyncio
@@ -134,7 +134,7 @@ def candle_patterns(df):
     return patterns
 
 # -----------------------
-# Вспомогательные функции
+# Вспомогательные
 # -----------------------
 def escape_md(text: str):
     return re.sub(r"([_*\[\]()~`>#+\-=|{}.!])", r"\\\1", str(text))
