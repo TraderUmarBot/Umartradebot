@@ -64,10 +64,12 @@ async def show_strategies(update: Update, context: ContextTypes.DEFAULT_TYPE, pa
     q = update.callback_query
     await q.answer()
     page_strategies = get_strategy_page(page)
+    
+    # Исправленная генерация клавиатуры стратегий
     keyboard = [[InlineKeyboardButton(s["name"], callback_data=f"strategy_{page}_{i}")]
-                for i, s in enumerate(page_strategies)]]
-    # keyboard is a list of lists — fix layout
-    keyboard = [[InlineKeyboardButton(s["name"], callback_data=f"strategy_{page}_{i}")] for i, s in enumerate(page_strategies)]
+                 for i, s in enumerate(page_strategies)]]
+    
+    # Навигация по страницам
     nav = []
     if page > 0:
         nav.append(InlineKeyboardButton("⬅ Назад", callback_data=f"strategies_{page-1}"))
@@ -75,7 +77,10 @@ async def show_strategies(update: Update, context: ContextTypes.DEFAULT_TYPE, pa
         nav.append(InlineKeyboardButton("Вперёд ➡", callback_data=f"strategies_{page+1}"))
     if nav:
         keyboard.append(nav)
+    
+    # Главное меню
     keyboard.append([InlineKeyboardButton("⬅ Главное меню", callback_data="back_to_menu")])
+    
     await q.edit_message_text("📘 Выберите стратегию:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def show_strategy_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, page, idx):
@@ -198,7 +203,7 @@ def total_pages(pairs):
     return (len(pairs) - 1) // PAIRS_PER_PAGE
 
 # -----------------------
-# MAIN MENU (универсальный: работает и с message, и с callback_query)
+# MAIN MENU (универсальный)
 # -----------------------
 async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
@@ -208,14 +213,13 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("📜 История сделок", callback_data="history")]
     ]
 
-    if update.message:  # вызван командой /start
+    if update.message:
         await update.message.reply_text("👋 Привет! Выберите рынок:", reply_markup=InlineKeyboardMarkup(keyboard))
-    elif update.callback_query:  # вызван из callback
+    elif update.callback_query:
         q = update.callback_query
         await q.answer()
         await q.edit_message_text("👋 Привет! Выберите рынок:", reply_markup=InlineKeyboardMarkup(keyboard))
 
-# алиас /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await show_main_menu(update, context)
 
@@ -252,7 +256,7 @@ async def show_signal(update: Update, context: ContextTypes.DEFAULT_TYPE, market
     notes_total = []
 
     for tf in tfs:
-        await asyncio.sleep(0.3)  # небольшая пауза, чтобы не перегружать yfinance
+        await asyncio.sleep(0.3)
         ticker = pair.replace(" OTC","").replace("/","") + "=X"
         try:
             df = yf.download(ticker, period="5d", interval=tf, progress=False)
@@ -263,7 +267,6 @@ async def show_signal(update: Update, context: ContextTypes.DEFAULT_TYPE, market
             continue
         df = df.tail(LOOKBACK).copy()
 
-        # простые индикаторы
         df["rsi"]=rsi(df["Close"])
         macd, macd_signal = MACD(df["Close"])
         df["macd"], df["macd_signal"] = macd, macd_signal
@@ -341,7 +344,6 @@ async def show_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     data = q.data
-    # маршрутизируем
     if data == "market_exchange":
         await choose_pair(update, context, "exchange", 0)
     elif data == "market_otc":
@@ -369,7 +371,7 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
         _, page, idx = data.split("_")
         await show_strategy_detail(update, context, int(page), int(idx))
     else:
-        await q.answer()  # заглушка
+        await q.answer()
 
 # -----------------------
 # Flask + Webhook + Application init
@@ -382,8 +384,6 @@ if not BOT_TOKEN or not WEBHOOK_URL:
     raise SystemExit("Set BOT_TOKEN and WEBHOOK_URL env vars")
 
 application = ApplicationBuilder().token(BOT_TOKEN).build()
-
-# регистрируем обработчики
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CallbackQueryHandler(callbacks))
 
@@ -400,8 +400,9 @@ def webhook(token):
     try:
         data = request.get_json(force=True)
         update = Update.de_json(data, application.bot)
-        # ставим задачу на обработку (асинхронно)
         loop = asyncio.get_event_loop()
+        loop.create_task
+
         loop.create_task(application.process_update(update))
         return "OK", 200
     except Exception:
@@ -409,7 +410,7 @@ def webhook(token):
         return "ERROR", 500
 
 async def _startup():
-    # Ensure application is initialized and started before we receive updates
+    # Инициализация приложения Telegram
     logging.info("Инициализация приложения Telegram...")
     await application.initialize()
     await application.start()
@@ -422,5 +423,5 @@ if __name__ == "__main__":
     loop = asyncio.get_event_loop()
     # стартуем application и ставим webhook
     loop.run_until_complete(_startup())
-    # запускаем Flask (development server). Render использует его для прослушивания.
+    # запускаем Flask (development server)
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
