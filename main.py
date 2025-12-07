@@ -399,21 +399,23 @@ application = ApplicationBuilder().token(BOT_TOKEN).build()
 application.add_handler(CommandHandler("start", start))
 application.add_handler(CallbackQueryHandler(callbacks))
 
-async def main():
-    logger.info("Инициализация Telegram бота...")
-    await application.initialize()
-    await application.start()
-    webhook_url = f"{WEBHOOK_URL.rstrip('/')}/webhook/{BOT_TOKEN}"
-    # register webhook
-    await application.bot.set_webhook(webhook_url)
-    logger.info(f"Webhook установлен: {webhook_url}")
-    # run webhook server (this creates and uses the proper event loop)
-    await application.run_webhook(
-        listen="0.0.0.0",
-        port=int(os.getenv("PORT", 10000)),
-        url_path=BOT_TOKEN,
-        webhook_url=webhook_url
-    )
-
 if __name__ == "__main__":
-    asyncio.run(main())
+    import nest_asyncio
+    nest_asyncio.apply()  # разрешаем повторное использование event loop в Render
+
+    async def start_bot():
+        logger.info("Инициализация Telegram бота...")
+        await application.initialize()
+        await application.start()
+        webhook_url = f"{WEBHOOK_URL.rstrip('/')}/webhook/{BOT_TOKEN}"
+        await application.bot.set_webhook(webhook_url)
+        logger.info(f"Webhook установлен: {webhook_url}")
+        # run webhook
+        await application.run_webhook(
+            listen="0.0.0.0",
+            port=int(os.getenv("PORT", 10000)),
+            url_path=BOT_TOKEN,
+            webhook_url=webhook_url
+        )
+
+    asyncio.run(start_bot())
