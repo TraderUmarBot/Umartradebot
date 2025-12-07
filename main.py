@@ -68,9 +68,9 @@ async def show_strategies(update: Update, context: ContextTypes.DEFAULT_TYPE, pa
     await q.answer()
     page_strategies = get_strategy_page(page)
     
-    # Клавиатура стратегий
+    # Клавиатура стратегий — каждая кнопка на отдельной строке
     keyboard = [[InlineKeyboardButton(s["name"], callback_data=f"strategy_{page}_{i}")]
-                 for i, s in enumerate(page_strategies)]]
+                 ] for i, s in enumerate(page_strategies)]
     
     # Навигация по страницам
     nav = []
@@ -403,25 +403,6 @@ def webhook(token):
     try:
         data = request.get_json(force=True)
         update = Update.de_json(data, application.bot)
-        loop = asyncio.get_event_loop         loop.create_task(application.process_update(update))
+        loop = asyncio.get_event_loop()
+        loop.create_task(application.process_update(update))
         return "OK", 200
-    except Exception:
-        logging.exception("Ошибка в webhook:")
-        return "ERROR", 500
-
-async def _startup():
-    # Инициализация приложения Telegram
-    logging.info("Инициализация приложения Telegram...")
-    await application.initialize()
-    await application.start()
-    # Установим webhook
-    url = f"{WEBHOOK_URL.rstrip('/')}/webhook/{BOT_TOKEN}"
-    await application.bot.set_webhook(url)
-    logging.info(f"Webhook установлен: {url}")
-
-if __name__ == "__main__":
-    loop = asyncio.get_event_loop()
-    # стартуем application и ставим webhook
-    loop.run_until_complete(_startup())
-    # запускаем Flask (development server)
-    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 10000)))
