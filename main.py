@@ -44,7 +44,7 @@ TF_HIERARCHY = {
 }
 
 # -----------------------
-# Стратегии (простые заглушки, можно заменить на реальные описания)
+# Стратегии
 # -----------------------
 STRATEGIES = [
     {"name": f"Стратегия {i+1}",
@@ -60,12 +60,15 @@ def get_strategy_page(page):
 def total_strategy_pages():
     return (len(STRATEGIES) - 1) // STRATEGIES_PER_PAGE
 
+# -----------------------
+# Меню стратегий
+# -----------------------
 async def show_strategies(update: Update, context: ContextTypes.DEFAULT_TYPE, page=0):
     q = update.callback_query
     await q.answer()
     page_strategies = get_strategy_page(page)
     
-    # Исправленная генерация клавиатуры стратегий
+    # Клавиатура стратегий
     keyboard = [[InlineKeyboardButton(s["name"], callback_data=f"strategy_{page}_{i}")]
                  for i, s in enumerate(page_strategies)]]
     
@@ -100,7 +103,7 @@ async def show_strategy_detail(update: Update, context: ContextTypes.DEFAULT_TYP
     )
 
 # -----------------------
-# Технические индикаторы (без изменений)
+# Технические индикаторы
 # -----------------------
 def rsi(series, period=14):
     delta = series.diff()
@@ -190,7 +193,7 @@ def candle_patterns(df):
     return patterns
 
 # -----------------------
-# Вспомогательные
+# Вспомогательные функции
 # -----------------------
 def escape_md(text: str):
     return re.sub(r"([_*\[\]()~`>#+\-=|{}.!])", r"\\\1", str(text))
@@ -203,7 +206,7 @@ def total_pages(pairs):
     return (len(pairs) - 1) // PAIRS_PER_PAGE
 
 # -----------------------
-# MAIN MENU (универсальный)
+# MAIN MENU
 # -----------------------
 async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
@@ -243,7 +246,7 @@ async def choose_pair(update: Update, context: ContextTypes.DEFAULT_TYPE, market
     await q.edit_message_text("⚡ Выберите валютную пару:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 # -----------------------
-# Multi-TF анализ (сигнал)
+# Multi-TF анализ
 # -----------------------
 async def show_signal(update: Update, context: ContextTypes.DEFAULT_TYPE, market, pair):
     q = update.callback_query
@@ -400,10 +403,7 @@ def webhook(token):
     try:
         data = request.get_json(force=True)
         update = Update.de_json(data, application.bot)
-        loop = asyncio.get_event_loop()
-        loop.create_task
-
-        loop.create_task(application.process_update(update))
+        loop = asyncio.get_event_loop         loop.create_task(application.process_update(update))
         return "OK", 200
     except Exception:
         logging.exception("Ошибка в webhook:")
