@@ -1,12 +1,13 @@
 # =======================
-# main.py — Telegram бот для Pocket Option (Анализ рынка)
+# main.py — Telegram бот для Pocket Option (анализ рынка)
 # =======================
 
-import logging, os, re, asyncio
+import logging, os, asyncio, re
 import nest_asyncio
 nest_asyncio.apply()
 
-import pandas as pd, yfinance as yf
+import pandas as pd
+import yfinance as yf
 from flask import Flask, request, abort
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
@@ -155,7 +156,6 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("📈 OTC рынок", callback_data="market_otc")],
         [InlineKeyboardButton("📜 История сделок", callback_data="history")]
     ]
-
     if update.message:
         await update.message.reply_text("👋 Привет! Выберите рынок:", reply_markup=InlineKeyboardMarkup(keyboard))
     elif update.callback_query:
@@ -186,7 +186,7 @@ async def choose_pair(update: Update, context: ContextTypes.DEFAULT_TYPE, market
     await q.edit_message_text("⚡ Выберите валютную пару:", reply_markup=InlineKeyboardMarkup(keyboard))
 
 # -----------------------
-# Multi-TF анализ
+# Анализ рынка и сигнал
 # -----------------------
 async def show_signal(update: Update, context: ContextTypes.DEFAULT_TYPE, market, pair):
     q = update.callback_query
@@ -226,9 +226,7 @@ async def show_signal(update: Update, context: ContextTypes.DEFAULT_TYPE, market
         else:
             sells += 1; notes.append("MACD Bear ⬇")
 
-        patterns = candle_patterns(df)
-        notes += patterns
-
+        notes_total += candle_patterns(df)
         buy_total += buys
         sell_total += sells
         notes_total += notes
@@ -338,8 +336,7 @@ def webhook(token):
     try:
         data = request.get_json(force=True)
         update = Update.de_json(data, application.bot)
-        loop = asyncio.get_event_loop()
-        loop.create_task(application.process_update(update))
+        asyncio.run(application.process_update(update))  # <- Асинхронная обработка
         return "OK", 200
     except Exception:
         logging.exception("Ошибка в webhook:")
