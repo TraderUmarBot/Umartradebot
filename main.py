@@ -1,20 +1,27 @@
-# main.py
+# main.py — Переписанный, стабильный, с защитой от rate-limit и фиксами
 import os
 import logging
 import asyncio
-import math
+import time
+from typing import Tuple, Optional, Dict, Any, List
+
 import pandas as pd
 import yfinance as yf
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
 
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.constants import ParseMode
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+)
+
+# ---------- Настройка логирования ----------
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ---------- Globals ----------
-user_state = {}
-trade_history = {}
-
+# ---------- Конфигурация ----------
 EXCHANGE_PAIRS = [
     "EUR/USD","GBP/USD","USD/JPY","AUD/USD","USD/CAD","USD/CHF",
     "EUR/JPY","GBP/JPY","AUD/JPY","EUR/GBP","EUR/AUD","GBP/AUD",
@@ -22,12 +29,19 @@ EXCHANGE_PAIRS = [
 ]
 
 EXCHANGE_ALLOWED = ["1m", "3m", "5m", "10m"]
-INTERVAL_MAP = {"3m": "2m", "10m": "5m"}  # YFinance mapping
-
+INTERVAL_MAP = {"3m": "2m", "10m": "5m"}  # YFinance mapping if нужно
 PAIRS_PER_PAGE = 6
 LOOKBACK = 120
 
-# ---------- Indicators ----------
+# cache for yfinance results: { (ticker,interval) : (timestamp, dataframe) }
+YF_CACHE: Dict[Tuple[str, str], Tuple[float, pd.DataFrame]] = {}
+YF_CACHE_TTL = 10.0  # seconds — кеш держим небольшим, чтобы не сильно ждать, но избежать rate limit
+
+# Simple in-memory storage (per-user)
+user_state: Dict[int, Dict[str, Any]] = {}
+trade_history: Dict[int, List[str]] = {}
+
+# ---------- Technical indicators ----------
 def rsi(series: pd.Series, period: int = 14) -> pd.Series:
     delta = series.diff()
     gain = delta.clip(lower=0)
@@ -50,9 +64,9 @@ def MACD(series: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9):
     signal_line = macd.ewm(span=signal, adjust=False).mean()
     return macd, signal_line
 
-def candle_patterns_df(df: pd.DataFrame):
-    patterns = []
-    if df.empty:
+def candle_patterns_df(df: pd.DataFrame) -> List[str]:
+    patterns: List[str] = []
+    if df.empty or len(df) < 1:
         return patterns
     o, c, h, l = df['Open'].iloc[-1], df['Close'].iloc[-1], df['High'].iloc[-1], df['Low'].iloc[-1]
     body = abs(c - o)
@@ -83,11 +97,153 @@ def total_pages(pairs):
 def yfinance_interval_for(requested: str) -> str:
     return INTERVAL_MAP.get(requested, requested)
 
-# ---------- Menu & Handlers ----------
+# ---------- Resilient yfinance download (async-friendly) ----------
+async def yf_download_cached(ticker: str, interval: str, retries: int = 3, backoff: float = 1.0) -> pd.DataFrame:
+    key = (ticker, interval)
+    now = time.time()
+    # return cache if fresh
+    cached = YF_CACHE.get(key)
+    if cached and now - cached[0] < YF_CACHE_TTL:
+        logger.debug("Using cached yfinance for %s %s", ticker, interval)
+        return cached[1].copy()
+
+    last_exc = None
+    for attempt in range(1, retries + 1):
+        try:
+            # yfinance is sync — run in thread to not block loop
+            df = await asyncio.to_thread(
+                yf.download,
+                ticker,
+                period="5d",
+                interval=interval,
+                progress=False,
+                threads=False,
+            )
+            if isinstance(df, pd.DataFrame) and not df.empty:
+                # store to cache
+                YF_CACHE[key] = (time.time(), df.copy())
+                return df
+            # if empty, treat as temporary and retry
+            last_exc = RuntimeError("Empty DataFrame from yfinance")
+            logger.warning("yfinance empty on %s %s attempt %d", ticker, interval, attempt)
+        except Exception as e:
+            logger.warning("yfinance attempt %d for %s failed: %s", attempt, ticker, repr(e))
+            last_exc = e
+        await asyncio.sleep(backoff * attempt)
+    # final: return empty df and log
+    logger.error("yfinance failed for %s %s after %d attempts: %s", ticker, interval, retries, repr(last_exc))
+    return pd.DataFrame()
+
+# ---------- Analysis ----------
+async def analyze_exchange(pair: str, expiry: str) -> Tuple[Optional[Dict[str, Any]], List[str]]:
+    ticker = pair.replace("/", "") + "=X"
+    yfi_interval = yfinance_interval_for(expiry)
+    notes: List[str] = []
+
+    df = await yf_download_cached(ticker, yfi_interval)
+    if df is None or df.empty or len(df) < 5:
+        return None, [f"Нет данных для {ticker} (interval={yfi_interval})"]
+
+    df = df.tail(LOOKBACK).copy()
+    # compute indicators
+    df["rsi"] = rsi(df["Close"])
+    df["sma50"] = SMA(df["Close"], period=50)
+    df["ema20"] = EMA(df["Close"], period=20)
+    macd, macd_signal = MACD(df["Close"])
+    df["macd"], df["macd_signal"] = macd, macd_signal
+
+    notes += candle_patterns_df(df)
+
+    last = df.iloc[-1].copy()  # ensure scalar access
+    try:
+        # get scalars safely
+        rsi_v = float(last["rsi"])
+        sma_v = float(last["sma50"])
+        ema_v = float(last["ema20"])
+        macd_v = float(last["macd"])
+        macd_sig_v = float(last["macd_signal"])
+        close_v = float(last["Close"])
+    except Exception as e:
+        logger.exception("Ошибка при извлечении значений из df: %s", e)
+        return None, ["Ошибка при разборе индикаторов"]
+
+    # Weighted scoring for a stronger signal
+    buy_score = 0.0
+    sell_score = 0.0
+
+    # RSI
+    if rsi_v < 30:
+        buy_score += 2.0
+        notes.append("RSI Oversold")
+    elif rsi_v > 70:
+        sell_score += 2.0
+        notes.append("RSI Overbought")
+
+    # MACD
+    if macd_v > macd_sig_v:
+        buy_score += 1.5
+        notes.append("MACD Bull")
+    else:
+        sell_score += 1.5
+        notes.append("MACD Bear")
+
+    # Trend vs SMA/EMA
+    if close_v > sma_v:
+        buy_score += 1.0
+        notes.append("Above SMA50")
+    else:
+        sell_score += 1.0
+        notes.append("Below SMA50")
+
+    if close_v > ema_v:
+        buy_score += 1.0
+        notes.append("Above EMA20")
+    else:
+        sell_score += 1.0
+        notes.append("Below EMA20")
+
+    # Candle bias (small boost)
+    last_candle = "Bullish" if last["Close"] > last["Open"] else "Bearish"
+    if last_candle == "Bullish":
+        buy_score += 0.5
+    else:
+        sell_score += 0.5
+
+    # Final decision
+    if buy_score > sell_score:
+        signal = "Вверх"
+        score = buy_score
+    elif sell_score > buy_score:
+        signal = "Вниз"
+        score = sell_score
+    else:
+        signal = "Нет сигнала"
+        score = buy_score  # equals sell_score
+
+    # Normalize confidence to 0..100 — tuned to give more weight for stronger score
+    # maximum plausible score here ~ (2 + 1.5 + 1 + 1 + 0.5) = 6
+    confidence = int(min(99, max(10, (score / 6.0) * 100)))
+
+    result = {
+        "signal": signal,
+        "conf": confidence,
+        "notes": notes,
+        "values": {
+            "rsi": rsi_v,
+            "macd": macd_v,
+            "macd_signal": macd_sig_v,
+            "sma50": sma_v,
+            "ema20": ema_v,
+            "close": close_v,
+        },
+    }
+    return result, notes
+
+# ---------- UI / Handlers ----------
 async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("📈 Биржевой рынок", callback_data="market|exchange")],
-        [InlineKeyboardButton("📜 История сделок", callback_data="history|")]
+        [InlineKeyboardButton("📜 История сделок", callback_data="history|")],
     ]
     if update.message:
         await update.message.reply_text("👋 Привет! Выберите рынок:", reply_markup=InlineKeyboardMarkup(keyboard))
@@ -96,10 +252,7 @@ async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.answer()
         await q.edit_message_text("👋 Привет! Выберите рынок:", reply_markup=InlineKeyboardMarkup(keyboard))
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await show_main_menu(update, context)
-
-async def choose_pair(update: Update, context: ContextTypes.DEFAULT_TYPE, page=0):
+async def choose_pair(update: Update, context: ContextTypes.DEFAULT_TYPE, page: int = 0):
     q = update.callback_query
     await q.answer()
     pairs = EXCHANGE_PAIRS
@@ -115,80 +268,62 @@ async def choose_pair(update: Update, context: ContextTypes.DEFAULT_TYPE, page=0
     keyboard.append([InlineKeyboardButton("⬅ Главное меню", callback_data="back|")])
     await q.edit_message_text("⚡ Выберите валютную пару:", reply_markup=InlineKeyboardMarkup(keyboard))
 
-async def choose_expiry(update: Update, context: ContextTypes.DEFAULT_TYPE, pair):
+async def choose_expiry(update: Update, context: ContextTypes.DEFAULT_TYPE, pair: str):
     q = update.callback_query
     await q.answer()
     keyboard = [[InlineKeyboardButton(tf, callback_data=f"analyze|{pair}|{tf}")] for tf in EXCHANGE_ALLOWED]
     keyboard.append([InlineKeyboardButton("⬅ Назад", callback_data="market|exchange")])
     keyboard.append([InlineKeyboardButton("⬅ Главное меню", callback_data="back|")])
-    await q.edit_message_text(f"Пара: {pair}\nВыберите таймфрейм:", reply_markup=InlineKeyboardMarkup(keyboard))
-
-# ---------- Analysis ----------
-async def analyze_exchange(pair: str, expiry: str):
-    ticker = pair.replace("/", "") + "=X"
-    yfi_interval = yfinance_interval_for(expiry)
-    notes = []
-    try:
-        df = yf.download(ticker, period="5d", interval=yfi_interval, progress=False, threads=False)
-    except Exception as e:
-        logger.exception("yfinance download error")
-        return None, [f"Ошибка загрузки данных: {e}"]
-
-    if df.empty or len(df) < 5:
-        return None, [f"Нет данных для {ticker} (interval={yfi_interval})"]
-
-    df = df.tail(LOOKBACK).copy()
-    df["rsi"] = rsi(df["Close"])
-    df["sma"] = SMA(df["Close"])
-    df["ema"] = EMA(df["Close"])
-    macd, macd_signal = MACD(df["Close"])
-    df["macd"], df["macd_signal"] = macd, macd_signal
-    notes += candle_patterns_df(df)
-
-    last = df.iloc[-1]
-    buy = sell = 0
-    # RSI
-    if last["rsi"] < 30: buy += 1; notes.append("RSI Oversold")
-    elif last["rsi"] > 70: sell += 1; notes.append("RSI Overbought")
-    # MACD
-    if last["macd"] > last["macd_signal"]: buy += 1; notes.append("MACD Bull")
-    else: sell += 1; notes.append("MACD Bear")
-    # SMA/EMA trend
-    if last["Close"] > last["sma"]: buy += 1; notes.append("Above SMA")
-    else: sell += 1; notes.append("Below SMA")
-    if last["Close"] > last["ema"]: buy += 1; notes.append("Above EMA")
-    else: sell += 1; notes.append("Below EMA")
-
-    if buy > sell: signal = "Вверх"
-    elif sell > buy: signal = "Вниз"
-    else: signal = "Нет сигнала"
-    confidence = min(90, 50 + max(buy, sell)*10)
-    return {"signal": signal, "conf": confidence, "notes": notes}, notes
+    await q.edit_message_text(f"Пара: {escape_md(pair)}\nВыберите таймфрейм:", parse_mode=ParseMode.MARKDOWN_V2, reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def show_signal(update: Update, context: ContextTypes.DEFAULT_TYPE, pair: str, expiry: str):
     q = update.callback_query
     await q.answer()
     uid = q.from_user.id
-    msg = await q.edit_message_text("🔍 Анализирую рынок...")
-
-    user_state[uid] = {"pair": pair, "expiry": expiry}
+    # Immediately save to user_state
+    user_state[uid] = {"pair": pair, "expiry": expiry, "ts": time.time()}
+    # show analyzing message
+    try:
+        await q.edit_message_text("🔍 Анализирую рынок...")
+    except Exception:
+        # if edit fails (message changed), just continue
+        pass
 
     result, notes = await analyze_exchange(pair, expiry)
     if not result:
-        await msg.edit_text(f"❗ Не удалось собрать сигнал.\nПричины: {' | '.join(notes)}")
+        msg = f"❗ Не удалось собрать сигнал.\nПричины: {' | '.join(notes)}"
+        try:
+            await q.edit_message_text(msg)
+        except Exception:
+            await q.answer(text=msg)
         return
 
-    text = (f"📊 Сигнал: *{escape_md(result['signal'])}*\n"
-            f"Пара: *{escape_md(pair)}*\n"
-            f"Таймфрейм: {escape_md(expiry)}\n"
-            f"Уверенность: {result['conf']}%\n"
-            f"Notes: {' | '.join(result['notes'])}")
+    # Build message
+    values = result.get("values", {})
+    text = (
+        f"📊 Сигнал: *{escape_md(result['signal'])}*\n"
+        f"Пара: *{escape_md(pair)}*\n"
+        f"Таймфрейм: *{escape_md(expiry)}*\n"
+        f"Уверенность: *{result['conf']} %*\n\n"
+        f"---- Технические значения ----\n"
+        f"RSI: {values.get('rsi', '—'):.2f}\n"
+        f"MACD: {values.get('macd', 0):.5f}  MACD_sig: {values.get('macd_signal', 0):.5f}\n"
+        f"SMA50: {values.get('sma50', 0):.5f}\n"
+        f"EMA20: {values.get('ema20', 0):.5f}\n\n"
+        f"Notes: {' | '.join(result.get('notes', []))}"
+    )
     keyboard = [
-        [InlineKeyboardButton("🟢 Плюс", callback_data="result|plus"),
-         InlineKeyboardButton("🔴 Минус", callback_data="result|minus")],
+        [InlineKeyboardButton("🟢 Плюс (сделка)", callback_data="result|plus"),
+         InlineKeyboardButton("🔴 Минус (сделка)", callback_data="result|minus")],
+        [InlineKeyboardButton("📈 Новый сигнал", callback_data="market|exchange")],
         [InlineKeyboardButton("⬅ Главное меню", callback_data="back|")]
     ]
-    await msg.edit_text(text, parse_mode="MarkdownV2", reply_markup=InlineKeyboardMarkup(keyboard))
+    try:
+        await q.edit_message_text(text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=InlineKeyboardMarkup(keyboard))
+    except Exception as e:
+        logger.exception("Не удалось отправить сообщение с сигналом: %s", e)
+        # fallback: send as simple text
+        await q.edit_message_text("Сигнал готов. Откройте чат заново, чтобы увидеть детали.")
 
 async def save_result(update: Update, context: ContextTypes.DEFAULT_TYPE, result_label: str):
     q = update.callback_query
@@ -196,13 +331,14 @@ async def save_result(update: Update, context: ContextTypes.DEFAULT_TYPE, result
     uid = q.from_user.id
     st = user_state.get(uid, {})
     pair = st.get("pair", "—")
-
-    trade_history.setdefault(uid, []).append(f"{pair} — {result_label}")
+    expiry = st.get("expiry", "—")
+    ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+    trade_history.setdefault(uid, []).append(f"{ts} — {pair} ({expiry}) — {result_label}")
     keyboard = [
         [InlineKeyboardButton("📈 Новый сигнал", callback_data="market|exchange")],
         [InlineKeyboardButton("📜 История", callback_data="history|")]
     ]
-    await q.edit_message_text(f"✅ Записано: *{escape_md(result_label)}*", parse_mode="MarkdownV2", reply_markup=InlineKeyboardMarkup(keyboard))
+    await q.edit_message_text(f"✅ Записано: *{escape_md(result_label)}*", parse_mode=ParseMode.MARKDOWN_V2, reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def show_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -212,11 +348,11 @@ async def show_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not entries:
         await q.edit_message_text("📭 История пустая.")
         return
-    text = "📜 *История:*\n\n" + "\n".join([f"• {escape_md(t)}" for t in entries[-50:]])
+    text = "📜 *История (последние 50):*\n\n" + "\n".join([f"• {escape_md(t)}" for t in entries[-50:]])
     keyboard = [[InlineKeyboardButton("⬅ Главное меню", callback_data="back|")]]
-    await q.edit_message_text(text, parse_mode="MarkdownV2", reply_markup=InlineKeyboardMarkup(keyboard))
+    await q.edit_message_text(text, parse_mode=ParseMode.MARKDOWN_V2, reply_markup=InlineKeyboardMarkup(keyboard))
 
-# ---------- Callback router ----------
+# ---------- Router ----------
 async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
@@ -224,41 +360,61 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     parts = data.split("|")
     cmd = parts[0] if parts else ""
     try:
-        if cmd == "market": await choose_pair(update, context)
-        elif cmd == "choose": page = int(parts[1]); await choose_pair(update, context, page)
-        elif cmd == "pair": pair = parts[1]; await choose_expiry(update, context, pair)
-        elif cmd == "analyze": pair, expiry = parts[1], parts[2]; await show_signal(update, context, pair, expiry)
-        elif cmd == "result": await save_result(update, context, "Плюс" if parts[1]=="plus" else "Минус")
-        elif cmd == "history": await show_history(update, context)
-        elif cmd == "back": await show_main_menu(update, context)
-    except Exception:
-        logger.exception("Ошибка в callback")
-        try: await q.edit_message_text("Произошла ошибка, попробуйте ещё раз.")
-        except: pass
+        if cmd == "market":
+            await choose_pair(update, context)
+        elif cmd == "choose":
+            page = int(parts[1])
+            await choose_pair(update, context, page)
+        elif cmd == "pair":
+            pair = parts[1]
+            await choose_expiry(update, context, pair)
+        elif cmd == "analyze":
+            pair, expiry = parts[1], parts[2]
+            await show_signal(update, context, pair, expiry)
+        elif cmd == "result":
+            label = "Плюс" if parts[1] == "plus" else "Минус"
+            await save_result(update, context, label)
+        elif cmd == "history":
+            await show_history(update, context)
+        elif cmd == "back":
+            await show_main_menu(update, context)
+        else:
+            await q.answer(text="Неизвестная команда")
+    except Exception as e:
+        logger.exception("Ошибка в callback: %s", e)
+        try:
+            await q.edit_message_text("Произошла ошибка, попробуйте ещё раз.")
+        except Exception:
+            pass
 
-# ---------- Bot setup ----------
+# ---------- Bot setup & run ----------
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+PORT = int(os.getenv("PORT", "10000"))
+
 if not BOT_TOKEN or not WEBHOOK_URL:
+    logger.error("Set BOT_TOKEN and WEBHOOK_URL env vars")
     raise SystemExit("Set BOT_TOKEN and WEBHOOK_URL env vars")
 
-application = ApplicationBuilder().token(BOT_TOKEN).build()
-application.add_handler(CommandHandler("start", start))
-application.add_handler(CallbackQueryHandler(callbacks))
+def build_application() -> "telegram.ext.Application":
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", show_main_menu))
+    app.add_handler(CallbackQueryHandler(callbacks))
+    return app
 
-async def main():
-    logger.info("Инициализация Telegram бота...")
-    await application.initialize()
-    await application.start()
-    webhook_url = f"{WEBHOOK_URL.rstrip('/')}/webhook/{BOT_TOKEN}"
-    await application.bot.set_webhook(webhook_url)
-    logger.info(f"Webhook установлен: {webhook_url}")
-    await application.updater.start_webhook(
+def main():
+    app = build_application()
+    # Using run_webhook (synchronous) avoids messing with multiple event loops
+    webhook_path = f"/webhook/{BOT_TOKEN}"
+    full_webhook = WEBHOOK_URL.rstrip("/") + webhook_path
+    logger.info("Setting webhook to %s", full_webhook)
+    # run_webhook will set webhook and start server in the same loop — stable and safe
+    app.run_webhook(
         listen="0.0.0.0",
-        port=int(os.getenv("PORT", 10000)),
-        webhook_url_path=BOT_TOKEN
+        port=PORT,
+        url_path=webhook_path.lstrip("/"),
+        webhook_url=full_webhook,
     )
-    await application.updater.idle()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
