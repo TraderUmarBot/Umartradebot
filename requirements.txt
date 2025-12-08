@@ -1,7 +1,4 @@
 python-telegram-bot==20.7
-Flask
-yfinance
-pandas
-numpy
-ta
-requests
+yfinance==0.2.54
+pandas==2.2.2
+numpy==1.26.4
