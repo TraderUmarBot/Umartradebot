@@ -1,4 +1,5 @@
-python-telegram-bot==20.7
-pandas
+python-telegram-bot[webhooks]==20.7
 yfinance
-asyncio
+pandas
+numpy
+ta
