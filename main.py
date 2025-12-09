@@ -7,7 +7,7 @@ import datetime
 import random
 
 # Токен твоего бота
-BOT_TOKEN = 8316818247:AAEZYEhSxDeixKNGvY2G4HYQEjdfaj5Un54
+BOT_TOKEN = "8316818247:AAEZYEhSxDeixKNGvY2G4HYQEjdfaj5Un54"
 
 # Валютные пары для анализа
 PAIRS = [
