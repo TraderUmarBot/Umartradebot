@@ -3,26 +3,37 @@ from datetime import datetime
 import pandas as pd
 import pandas_ta as ta
 import pytz 
-import yfinance as yf # Для получения данных Forex
+import yfinance as yf 
 from aiogram import Bot, Dispatcher, types, executor
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils.markdown import escape_md, code, bold 
+# Импорты для режима Webhook:
+from aiogram.dispatcher.webhook import get_new_configured_app, set_webhook
+from aiohttp import web
 
 # --- 1. КОНФИГУРАЦИЯ ---
 
 # Читаем переменные из окружения Render.
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-# API_ID и API_SECRET теперь не нужны, так как мы используем yfinance
+WEBHOOK_HOST = os.getenv('WEBHOOK_URL')  # URL твоего сервиса на Render
+WEBAPP_PORT = int(os.getenv('PORT', 10000)) # Порт, который слушает твой worker
+
+# Определяем путь и полный URL для вебхука
+WEBHOOK_PATH = f'/{TELEGRAM_TOKEN}'
+if WEBHOOK_HOST:
+    WEBHOOK_URL = f"{WEBHOOK_HOST}{WEBHOOK_PATH}"
+else:
+    WEBHOOK_URL = None
 
 if not TELEGRAM_TOKEN:
     print("❌ ОШИБКА: TELEGRAM_TOKEN не найден в переменных окружения.")
     exit(1)
 
-# Настройка временной зоны для проверки выходного дня (Москва/UTC+3)
+# Настройка временной зоны (Москва/UTC+3)
 TIMEZONE = 'Europe/Moscow' 
 TZ = pytz.timezone(TIMEZONE)
 
-# Валютные пары и их тикеры для Yfinance (EUR/USD -> EURUSD=X)
+# Валютные пары и их тикеры для Yfinance
 PAIRS_TICKERS = {
     "EUR/USD": "EURUSD=X", "GBP/USD": "GBPUSD=X", "USD/JPY": "USDJPY=X", 
     "AUD/USD": "AUDUSD=X", "USD/CAD": "CAD=X", "USD/CHF": "CHF=X",
@@ -32,26 +43,22 @@ PAIRS_TICKERS = {
     "GBP/CAD": "GBPCAD=X", "AUD/CAD": "AUDCAD=X", "AUD/CHF": "AUDCHF=X", 
     "CAD/CHF": "CADCHF=X"
 }
-# Список пар для меню
 PAIRS = list(PAIRS_TICKERS.keys())
 
-# Таймфрейм для Yfinance (1h, 1d, 1wk и т.д.). 1h - самый маленький, который часто работает.
 TIMEFRAME = '1h' 
-LIMIT_DAYS = '7d' # Загружаем данные за последнюю неделю
+LIMIT_DAYS = '7d' 
 
-# Инициализация бота и диспетчера с MarkdownV2
+# Инициализация бота и диспетчера
 bot = Bot(token=TELEGRAM_TOKEN, parse_mode='MarkdownV2')
 dp = Dispatcher(bot)
 
 # --- ВРЕМЕННОЕ ХРАНИЛИЩЕ ДЛЯ ИСТОРИИ ---
-# ВНИМАНИЕ: Для продакшена замените на базу данных (SQLite/PostgreSQL)!
 user_history = {} 
 
 # --- 2. ФУНКЦИИ АНАЛИЗА И ПРОВЕРКИ ---
 
 def is_weekend():
-    """Проверяет, является ли текущий день субботой (5) или воскресеньем (6) 
-    в часовом поясе Europe/Moscow."""
+    """Проверяет, является ли текущий день субботой (5) или воскресеньем (6)."""
     now = datetime.now(TZ)
     return now.weekday() >= 5
 
@@ -72,21 +79,17 @@ def get_ohlcv(symbol: str, timeframe=TIMEFRAME):
         df = data.dropna()
         df.columns = df.columns.str.lower()
         df = df[['open', 'high', 'low', 'close', 'volume']]
-        
         return df
     except Exception as e:
         print(f"Ошибка получения данных Yfinance для {symbol}: {e}")
         return pd.DataFrame()
 
 def analyze_and_predict(df: pd.DataFrame, symbol: str):
-    """
-    Основная функция технического анализа (15+ индикаторов).
-    Использует балльную систему для определения уверенности.
-    """
+    """Основная функция технического анализа (15+ индикаторов)."""
     if df.empty or len(df) < 50:
         return None
 
-    # --- РАСЧЕТ ИНДИКАТОРОВ (15+ имитация) ---
+    # Расчет индикаторов
     df.ta.rsi(append=True)
     df.ta.macd(append=True)
     df.ta.sma(length=50, append=True) 
@@ -97,13 +100,11 @@ def analyze_and_predict(df: pd.DataFrame, symbol: str):
     df.ta.obv(append=True) 
     df.ta.aop(append=True) 
     df.ta.vwap(append=True)
-    # Добавьте еще 5+ индикаторов здесь, используя df.ta.NAME()
+    # Здесь должны быть остальные индикаторы для 15+
 
-    # --- СЛОЖНАЯ ЛОГИКА ОПРЕДЕЛЕНИЯ СИГНАЛА ---
+    # Балльная система и логика определения сигнала
     last = df.iloc[-1]
     score = 0
-    
-    # Балльная система
     if last['MACDh_12_26_9'] > 0: score += 2
     if last['RSI_14'] < 30: score += 3 
     if last['close'] > last['SMA_50']: score += 1
@@ -129,7 +130,6 @@ def analyze_and_predict(df: pd.DataFrame, symbol: str):
         
     confidence_base = 65.0
     confidence = min(99.99, confidence_base + abs(score) * 3) 
-    
     expiration_time = "3 часа" if TIMEFRAME == '1h' else "6 часов"
 
     return {
@@ -142,7 +142,7 @@ def analyze_and_predict(df: pd.DataFrame, symbol: str):
     }
 
 def analyze_news(symbol: str):
-    """Заглушка для функции анализа новостей (Фундаментальный анализ)."""
+    """Заглушка для функции анализа новостей."""
     direction = bold(escape_md("ВНИЗ (SELL)")) + " 🔴"
     reason = "Предстоящий отчет по инфляции \\(CPI\\) в США вышел выше ожиданий, что исторически укрепляет USD, ослабляя EUR/USD\\."
     confidence = "92\\.15\\%"
@@ -161,7 +161,7 @@ def analyze_news(symbol: str):
 
 # --- 3. ОБРАБОТЧИКИ (Telegram) ---
 
-# Главное меню
+# Главное меню (кнопки)
 main_menu = InlineKeyboardMarkup(row_width=1)
 main_menu.add(
     InlineKeyboardButton("📊 Валютные пары (Тех\\. Анализ)", callback_data='pairs'),
@@ -185,8 +185,6 @@ async def weekend_blocker_message(user_id):
         "Ты дебил иди отдыхай я тоже отдыхаю после того как тебе давал сигнал я тоже устал 😅"
     )
 
-# --- Обработчики Сообщений и Команд ---
-
 @dp.message_handler(commands=['start', 'help'])
 async def send_welcome(message: types.Message):
     """Обработчик команды /start."""
@@ -198,8 +196,6 @@ async def send_welcome(message: types.Message):
         f"👋 Привет, {escape_md(message.from_user.first_name)}! Я твой торговый помощник\\.\nВыбери нужную функцию:",
         reply_markup=main_menu
     )
-
-# --- Обработчики Кнопок (Callbacks) ---
 
 @dp.callback_query_handler(lambda c: c.data == 'pairs')
 async def show_pairs_menu(callback_query: types.CallbackQuery):
@@ -213,7 +209,6 @@ async def show_pairs_menu(callback_query: types.CallbackQuery):
     pairs_menu = InlineKeyboardMarkup(row_width=2)
     
     for pair in PAIRS:
-        # Используем пару как есть, потому что в PAIRS уже нужный нам формат (EUR/USD)
         cb_data = f'analyze_{pair.replace("/", "_")}' 
         pairs_menu.insert(InlineKeyboardButton(pair, callback_data=cb_data))
         
@@ -235,7 +230,6 @@ async def run_analysis(callback_query: types.CallbackQuery):
         
     await bot.answer_callback_query(callback_query.id, text="Провожу глубокий Тех\\. Анализ...", show_alert=False)
     
-    # Восстанавливаем символ пары из callback data (analyze_EUR_USD -> EUR/USD)
     symbol_raw = callback_query.data.split('_', 1)[1]
     symbol = symbol_raw.replace('_', '/')
     
@@ -256,7 +250,6 @@ async def run_analysis(callback_query: types.CallbackQuery):
     signal = analyze_and_predict(df, symbol)
     
     if signal and signal['direction'] != 'НЕЙТРАЛЬНО ⚪':
-        # Создаем ID для истории
         signal_id = str(hash(signal['symbol'] + signal['direction'] + str(datetime.now(TZ))))
         
         message_text = f"""
@@ -404,11 +397,50 @@ async def back_to_main_menu(callback_query: types.CallbackQuery):
         reply_markup=main_menu
     )
 
-# --- 4. ЗАПУСК ---
+# --- 4. ЗАПУСК (РЕЖИМ WEBHOOK) ---
+
+WEBAPP_HOST = '0.0.0.0' # Слушаем все интерфейсы
+
+async def on_startup(app):
+    """Действия при запуске: устанавливаем вебхук на серверах Telegram."""
+    if not WEBHOOK_URL:
+        print("❌ ОШИБКА: Переменная WEBHOOK_URL не найдена. Не могу установить вебхук.")
+        await bot.close()
+        return
+
+    print("Приложение запущено. Устанавливаю вебхук...")
+    try:
+        # Устанавливаем вебхук. Render должен иметь доверенный SSL.
+        await bot.set_webhook(WEBHOOK_URL)
+        print(f"✅ Вебхук установлен: {WEBHOOK_URL}")
+    except Exception as e:
+        print(f"❌ Ошибка установки вебхука: {e}")
+        await bot.close()
+        
+
+async def on_shutdown(app):
+    """Действия при отключении: Удаляем вебхук."""
+    print("Приложение завершает работу. Удаляю вебхук...")
+    try:
+        await bot.delete_webhook()
+        print("✅ Вебхук успешно удален.")
+    except Exception as e:
+        print(f"❌ Ошибка удаления вебхука: {e}")
+        
+
 if __name__ == '__main__':
-    print("Бот запущен. Нажмите Ctrl+C для остановки.")
-    # Проверяем, что токен есть перед запуском
-    if TELEGRAM_TOKEN:
-        executor.start_polling(dp, skip_updates=True)
-    else:
-        print("Невозможно запустить бота: Токен не найден.")
+    # Настраиваем приложение AIOHTTP для диспетчера aiogram
+    app = dp.get_new_configured_app(path=WEBHOOK_PATH)
+    
+    # Регистрируем функции запуска и отключения
+    app.on_startup.append(on_startup)
+    app.on_shutdown.append(on_shutdown)
+    
+    print(f"🚀 Запускаю веб-сервер на {WEBAPP_HOST}:{WEBAPP_PORT}")
+    
+    # Запускаем AIOHTTP веб-сервер
+    web.run_app(
+        app,
+        host=WEBAPP_HOST,
+        port=WEBAPP_PORT
+    )
