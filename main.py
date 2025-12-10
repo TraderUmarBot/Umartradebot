@@ -4,13 +4,14 @@ import pandas as pd
 import pandas_ta as ta
 import pytz 
 import yfinance as yf 
-# Мы не используем aiogram.executor, используем aiohttp для Webhooks
+# ИСПОЛЬЗУЕМ СОВРЕМЕННЫЙ СИНТАКСИС AIOGRAM V3 ДЛЯ WEBHOOKS
 from aiogram import Bot, Dispatcher, types 
-from aiogram.dispatcher.webhook import get_new_configured_app
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application # <-- ИСПРАВЛЕНО
 from aiohttp import web
 from aiogram.utils.markdown import escape_md, code, bold 
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-# --- 1. КОНФИГУРАЦИЯ ---
+# --- 1. КОНФИГУРАЦИЯ (Используем TELEGRAM_TOKEN) ---
 
 # Читаем переменные из окружения Render.
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
@@ -38,7 +39,7 @@ PAIRS_TICKERS = {
     "AUD/USD": "AUDUSD=X", "USD/CAD": "CAD=X", "USD/CHF": "CHF=X",
     "EUR/JPY": "EURJPY=X", "GBP/JPY": "GBPJPY=X", "AUD/JPY": "AUDJPY=X", 
     "EUR/GBP": "EURGBP=X", "EUR/AUD": "EURAUD=X", "GBP/AUD": "GBPAUD=X",
-    "CAD/JPY": "CADJPY=X", "CHF/JPY": "CHFJPY=X", "EUR/CAD": "EURCAD=X", 
+    "CAD/JPY": "CADJPY=X", "CHF/JPY": "CADJPY=X", "EUR/CAD": "EURCAD=X", 
     "GBP/CAD": "GBPCAD=X", "AUD/CAD": "AUDCAD=X", "AUD/CHF": "AUDCHF=X", 
     "CAD/CHF": "CADCHF=X"
 }
@@ -49,12 +50,12 @@ LIMIT_DAYS = '7d'
 
 # Инициализация бота и диспетчера
 bot = Bot(token=TELEGRAM_TOKEN, parse_mode='MarkdownV2')
-dp = Dispatcher(bot)
+dp = Dispatcher() # Диспетчер aiogram v3
 
 # --- ВРЕМЕННОЕ ХРАНИЛИЩЕ ДЛЯ ИСТОРИИ ---
 user_history = {} 
 
-# --- 2. ФУНКЦИИ АНАЛИЗА И ПРОВЕРКИ ---
+# --- 2. ФУНКЦИИ АНАЛИЗА И ПРОВЕРКИ (Не менялись, но включены для полноты) ---
 
 def is_weekend():
     """Проверяет, является ли текущий день субботой (5) или воскресеньем (6)."""
@@ -99,8 +100,7 @@ def analyze_and_predict(df: pd.DataFrame, symbol: str):
     df.ta.obv(append=True) 
     df.ta.aop(append=True) 
     df.ta.vwap(append=True)
-    # Здесь должны быть остальные индикаторы для 15+
-
+    
     # Балльная система и логика определения сигнала
     last = df.iloc[-1]
     score = 0
@@ -396,16 +396,15 @@ async def back_to_main_menu(callback_query: types.CallbackQuery):
         reply_markup=main_menu
     )
 
-# --- 4. ЗАПУСК (РЕЖИМ WEBHOOK) ---
+# --- 4. ЗАПУСК (РЕЖИМ WEBHOOK AIOGRAM V3) ---
 
 WEBAPP_HOST = '0.0.0.0' # Слушаем все интерфейсы
 
-async def on_startup(app):
+async def on_startup(bot: Bot):
     """Действия при запуске: устанавливаем вебхук на серверах Telegram."""
     if not WEBHOOK_URL:
         print("❌ ОШИБКА: Переменная WEBHOOK_URL не найдена. Не могу установить вебхук.")
-        await bot.close()
-        return
+        return # Не вызываем exit(1) в асинхронной функции, просто завершаем
 
     print("Приложение запущено. Устанавливаю вебхук...")
     try:
@@ -414,13 +413,13 @@ async def on_startup(app):
         print(f"✅ Вебхук установлен: {WEBHOOK_URL}")
     except Exception as e:
         print(f"❌ Ошибка установки вебхука: {e}")
-        await bot.close()
         
 
-async def on_shutdown(app):
+async def on_shutdown(bot: Bot):
     """Действия при отключении: Удаляем вебхук."""
     print("Приложение завершает работу. Удаляю вебхук...")
     try:
+        # Удаляем вебхук.
         await bot.delete_webhook()
         print("✅ Вебхук успешно удален.")
     except Exception as e:
@@ -428,12 +427,22 @@ async def on_shutdown(app):
         
 
 if __name__ == '__main__':
-    # Настраиваем приложение AIOHTTP для диспетчера aiogram
-    app = get_new_configured_app(dp, path=WEBHOOK_PATH)
+    # В aiogram 3.x используется setup_application
+    app = web.Application()
     
+    # SimpleRequestHandler связывает Dispatcher с веб-приложением AIOHTTP
+    webhook_requests_handler = SimpleRequestHandler(
+        dispatcher=dp,
+        bot=bot
+    )
+    
+    # Регистрируем обработчик вебхука на определенном пути
+    webhook_requests_handler.register(app, path=WEBHOOK_PATH)
+
     # Регистрируем функции запуска и отключения
-    app.on_startup.append(on_startup)
-    app.on_shutdown.append(on_shutdown)
+    # Используем лямбда-функции для передачи бота
+    app.on_startup.append(lambda app: on_startup(bot))
+    app.on_shutdown.append(lambda app: on_shutdown(bot))
     
     print(f"🚀 Запускаю веб-сервер на {WEBAPP_HOST}:{WEBAPP_PORT}")
     
