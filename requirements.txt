@@ -1,6 +1,0 @@
-aiogram==3.10.0
-pandas
-pandas-ta
-pytz
-yfinance
-aiohttp
