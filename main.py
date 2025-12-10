@@ -8,7 +8,7 @@ import yfinance as yf
 from aiogram import Bot, Dispatcher, types 
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application # <-- ИСПРАВЛЕНО
 from aiohttp import web
-from aiogram.utils.markdown import escape_md, code, bold 
+from aiogram.utils.text import escape_md, code, bold # <-- ИСПРАВЛЕННЫЙ ИМПОРТ ДЛЯ AIOGRAM V3
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 # --- 1. КОНФИГУРАЦИЯ (Используем TELEGRAM_TOKEN) ---
