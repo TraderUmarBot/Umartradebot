@@ -4,18 +4,17 @@ import pandas as pd
 import pandas_ta as ta
 import pytz 
 import yfinance as yf 
-from aiogram import Bot, Dispatcher, types, executor
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.utils.markdown import escape_md, code, bold 
-# Импорты для режима Webhook:
-from aiogram.dispatcher.webhook import get_new_configured_app, set_webhook
+# Мы не используем aiogram.executor, используем aiohttp для Webhooks
+from aiogram import Bot, Dispatcher, types 
+from aiogram.dispatcher.webhook import get_new_configured_app
 from aiohttp import web
+from aiogram.utils.markdown import escape_md, code, bold 
 
 # --- 1. КОНФИГУРАЦИЯ ---
 
 # Читаем переменные из окружения Render.
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-WEBHOOK_HOST = os.getenv('WEBHOOK_URL')  # URL твоего сервиса на Render
+WEBHOOK_HOST = os.getenv('WEBHOOK_URL')  # URL твоего сервиса на Render (напр., https://mybot.onrender.com)
 WEBAPP_PORT = int(os.getenv('PORT', 10000)) # Порт, который слушает твой worker
 
 # Определяем путь и полный URL для вебхука
@@ -410,7 +409,7 @@ async def on_startup(app):
 
     print("Приложение запущено. Устанавливаю вебхук...")
     try:
-        # Устанавливаем вебхук. Render должен иметь доверенный SSL.
+        # Устанавливаем вебхук.
         await bot.set_webhook(WEBHOOK_URL)
         print(f"✅ Вебхук установлен: {WEBHOOK_URL}")
     except Exception as e:
@@ -430,7 +429,7 @@ async def on_shutdown(app):
 
 if __name__ == '__main__':
     # Настраиваем приложение AIOHTTP для диспетчера aiogram
-    app = dp.get_new_configured_app(path=WEBHOOK_PATH)
+    app = get_new_configured_app(dp, path=WEBHOOK_PATH)
     
     # Регистрируем функции запуска и отключения
     app.on_startup.append(on_startup)
